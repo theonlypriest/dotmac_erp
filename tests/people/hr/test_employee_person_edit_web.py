@@ -760,6 +760,105 @@ def test_employee_new_form_does_not_load_position_options_initially(
     assert response.context["position_options"] == []
 
 
+def test_employee_new_form_exposes_siwes_intern_designation(
+    db_session, person, monkeypatch
+):
+    service = HRWebService()
+    _stub_new_employee_form_dependencies(monkeypatch, db_session)
+    designation_id = uuid4()
+    siwes_designation = SimpleNamespace(
+        designation_id=designation_id,
+        designation_code="SIWES-INTERN",
+        designation_name="SIWES Intern",
+    )
+    designation_result = SimpleNamespace(items=[siwes_designation])
+
+    monkeypatch.setattr(
+        "app.services.people.hr.web.employee_web.OrganizationService.list_designations",
+        lambda self, filters, pagination: designation_result,
+    )
+
+    request = _make_new_employee_request({})
+    auth = _make_auth(person.id, person.organization_id, ["people:write"])
+
+    response = service.employee_new_form_response(
+        request=request,
+        auth=auth,
+        db=db_session,
+    )
+
+    assert response.status_code == 200
+    assert response.context["designations"] == [siwes_designation]
+
+
+@pytest.mark.asyncio
+async def test_create_employee_response_passes_siwes_intern_designation_id(
+    db_session, person, monkeypatch
+):
+    service = HRWebService()
+    employee_id = uuid4()
+    structure_id = uuid4()
+    designation_id = uuid4()
+    captured: dict[str, object] = {}
+    _stub_salary_structure_lookup(
+        db_session, monkeypatch, person.organization_id, structure_id
+    )
+
+    def _capture_create(self, person_id, data):
+        captured["person_id"] = person_id
+        captured["designation_id"] = data.designation_id
+        return SimpleNamespace(employee_id=employee_id, person_id=person_id)
+
+    monkeypatch.setattr(
+        "app.services.people.hr.web.employee_web.EmployeeService.create_employee",
+        _capture_create,
+    )
+    invite_path = (
+        "app.services.people.hr.web.employee_web."
+        "EmployeeService.send_employee_access_invite"
+    )
+    monkeypatch.setattr(
+        invite_path,
+        lambda self, employee_id, app_url, attachments=None: SimpleNamespace(
+            sent=True,
+            recipient_kind="work",
+            recipient_email="user@example.com",
+        ),
+    )
+    monkeypatch.setattr(
+        HRWebService,
+        "_update_tax_profile",
+        lambda self, *, auth, db, employee, form: None,
+    )
+    monkeypatch.setattr(
+        HRWebService,
+        "_create_initial_salary_assignment",
+        staticmethod(lambda **kwargs: None),
+    )
+
+    request = _make_new_employee_request(
+        {
+            "linked_person_id": str(person.id),
+            "date_of_joining": "2026-01-01",
+            "designation_id": str(designation_id),
+            "employment_type_id": str(uuid4()),
+            "salary_mode": "BANK",
+            "salary_structure_id": str(structure_id),
+        }
+    )
+    auth = _make_auth(person.id, person.organization_id, ["people:write"])
+
+    response = await service.create_employee_response(
+        request=request,
+        auth=auth,
+        db=db_session,
+    )
+
+    assert response.status_code == 303
+    assert captured["person_id"] == person.id
+    assert captured["designation_id"] == designation_id
+
+
 @pytest.mark.asyncio
 async def test_update_employee_response_persists_nysc_dates(
     db_session, person, monkeypatch
