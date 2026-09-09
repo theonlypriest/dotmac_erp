@@ -45,6 +45,8 @@ import ast
 import pathlib
 import sys
 
+import pytest
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 BASELINE = pathlib.Path(__file__).with_name("rls_scope_baseline.txt")
@@ -99,11 +101,25 @@ def _read_baseline() -> set[str]:
     }
 
 
+def new_unscoped_scripts(current: set[str], baseline: set[str]) -> list[str]:
+    """Direction 1: an unscoped script the baseline does not already admit."""
+    return sorted(current - baseline)
+
+
+def stale_baseline_entries(
+    current: set[str],
+    baseline: set[str],
+    missing: set[str],
+) -> list[str]:
+    """Direction 2: a baseline entry that is fixed but still claimed broken."""
+    return sorted(baseline - current - missing)
+
+
 def test_no_new_unscoped_scripts() -> None:
     """A new script that reads nothing must not be able to ship quietly."""
     current = set(find_unscoped_scripts())
     baseline = _read_baseline()
-    new = sorted(current - baseline)
+    new = new_unscoped_scripts(current, baseline)
     assert not new, (
         "These scripts open a SessionLocal and never set an organization scope "
         "or an explicit bypass. Under FORCE RLS they will read zero rows and "
@@ -117,10 +133,81 @@ def test_baseline_has_not_gone_stale() -> None:
     """A fixed script must leave the list, or the list outlives the problem."""
     current = set(find_unscoped_scripts())
     baseline = _read_baseline()
-    now_scoped = sorted(baseline - current - _missing_files(baseline))
+    now_scoped = stale_baseline_entries(current, baseline, _missing_files(baseline))
     assert not now_scoped, (
         "These scripts now scope their session and must be removed from "
         "rls_scope_baseline.txt:\n  " + "\n  ".join(now_scoped)
+    )
+
+
+def test_the_scanner_separates_a_scoped_script_from_an_unscoped_one(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Positive control for the scan the two ratchet rules are built on.
+
+    Both rules below reduce to a set difference against `find_unscoped_scripts`.
+    If that walk silently returned nothing -- a moved directory, a renamed
+    helper, an import that stopped resolving -- BOTH directions would pass
+    while enforcing nothing. So the scan is first shown to find a planted
+    violation and to clear a planted fix.
+    """
+    (tmp_path / "unscoped.py").write_text(
+        "from app.db import SessionLocal\n\n\ndef run():\n"
+        "    db = SessionLocal()\n    return db\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "scoped.py").write_text(
+        "from app.db import SessionLocal\n"
+        "from app.rls import tenant_context_sync\n\n\ndef run(org):\n"
+        "    db = SessionLocal()\n"
+        "    with tenant_context_sync(db, org):\n        return db\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "no_session.py").write_text("VALUE = 1\n", encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "SCRIPTS_DIR", tmp_path)
+
+    assert find_unscoped_scripts() == ["scripts/unscoped.py"]
+
+
+def test_the_ratchet_bites_in_both_directions() -> None:
+    """Neither direction may be a no-op, and both are proved against real files.
+
+    Direction 1 (a NEW violation) and direction 2 (an UNEXPLAINED reduction --
+    a baseline entry that has actually been fixed) are separate assertions in
+    separate tests. A ratchet with only one of them absorbs regressions in the
+    other, so each is exercised here with a mutation of the live inputs.
+    """
+    live_current = set(find_unscoped_scripts())
+    live_baseline = _read_baseline()
+
+    # Direction 1: an unscoped script that the baseline does not admit.
+    added = "scripts/__planted_unscoped__.py"
+    assert new_unscoped_scripts(live_current | {added}, live_baseline) == [added]
+    # ... and the unmutated inputs really are clean, so the mutation is the
+    # only reason the assertion above fired.
+    assert new_unscoped_scripts(live_current, live_baseline) == []
+
+    # Direction 2: a baseline entry whose file exists and now scopes must be
+    # reported until the baseline is deliberately lowered. `add_missing_contract
+    # _staff.py` is exactly that case -- it was in the baseline, this change
+    # scoped it, and the baseline was regenerated with the repository's own
+    # `--update` path.
+    repaired = "scripts/add_missing_contract_staff.py"
+    assert (REPO_ROOT / repaired).is_file()
+    assert repaired not in live_current
+    assert repaired not in live_baseline
+    stale = stale_baseline_entries(
+        live_current,
+        live_baseline | {repaired},
+        _missing_files(live_baseline | {repaired}),
+    )
+    assert stale == [repaired]
+    assert (
+        stale_baseline_entries(
+            live_current, live_baseline, _missing_files(live_baseline)
+        )
+        == []
     )
 
 

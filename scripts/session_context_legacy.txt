@@ -22,11 +22,9 @@
 #      `session_for_org(org_id)` or `cross_org_session()`.
 #
 # Format: <path> <number-of-raw-SessionLocal()-calls>
-scripts/add_missing_contract_staff.py 1
 scripts/bulk_import.py 1
 scripts/fix_display_names.py 1
 scripts/import_dotmac_tb.py 1
 scripts/import_tb_audit.py 1
 scripts/link_gl_bank_accounts.py 1
 scripts/migration/2026-04-30_backfill_deferred_vat.py 1
-scripts/seed_payroll_from_excel.py 1

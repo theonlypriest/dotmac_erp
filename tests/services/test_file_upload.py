@@ -11,6 +11,7 @@ import pytest
 
 from app.services.file_upload import (
     FileTooLargeError,
+    FileStorageError,
     FileUploadConfig,
     FileUploadService,
     InvalidContentTypeError,
@@ -226,6 +227,18 @@ class TestSave:
             )
 
         mock_storage.upload.assert_not_called()
+
+    def test_save_fails_closed_when_object_storage_rejects_upload(
+        self, image_service, mock_storage
+    ):
+        mock_storage.upload.side_effect = RuntimeError("provider unavailable")
+
+        with pytest.raises(FileStorageError, match="Object storage upload failed"):
+            image_service.save(
+                b"image",
+                content_type="image/jpeg",
+                original_filename="photo.jpg",
+            )
 
     def test_save_generates_unique_filenames(self, image_service, mock_storage):
         data = b"\x89PNG" + b"\x00" * 50

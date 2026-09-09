@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from uuid import UUID
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from app.config import settings
 from app.models.finance.rpt.report_instance import ReportInstance, ReportStatus
 from app.services.common import coerce_uuid
 from app.services.finance.rpt.report_instance import (
@@ -74,10 +72,6 @@ EXPORT_DEFINITIONS = {
         "formats": {"CSV"},
     },
 }
-
-
-def _generated_reports_dir() -> Path:
-    return (Path(settings.generated_docs_dir) / "reports").resolve()
 
 
 def queue_background_export(
@@ -173,17 +167,22 @@ def get_completed_export_for_download(
     filename = f"{config['filename_prefix']}_{instance.instance_id}.{suffix}"
     output_path = instance.output_file_path
 
-    if output_path.startswith("s3://"):
-        key = output_path.removeprefix("s3://")
-        chunks, content_type, content_length = get_storage().stream(key)
-        return chunks, filename, content_type or media_type, content_length
-
-    base_dir = _generated_reports_dir()
-    file_path = Path(output_path).resolve()
-    if base_dir not in file_path.parents or not file_path.is_file():
+    if not output_path.startswith("s3://"):
         raise HTTPException(status_code=404, detail="Export file not found")
 
-    return file_path, filename, media_type, file_path.stat().st_size
+    key = output_path.removeprefix("s3://")
+    try:
+        storage = get_storage()
+        if not storage.exists(key):
+            raise HTTPException(status_code=404, detail="Export file not found")
+        chunks, content_type, content_length = storage.stream(key)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503, detail="Report storage is temporarily unavailable"
+        ) from exc
+    return chunks, filename, content_type or media_type, content_length
 
 
 def get_export_status(

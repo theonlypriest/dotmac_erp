@@ -1074,6 +1074,23 @@ url = "https://registry.dotmac.io/api/packages/dotmac/pypi/simple"
 reference = "forgejo"
 
 [[package]]
+name = "dotmac-deployment-foundation"
+version = "0.2.0a2"
+description = "Stateless build- and deploy-time facility for Dotmac product assemblies"
+optional = false
+python-versions = ">=3.11,<3.14"
+groups = ["dev"]
+files = [
+    {file = "dotmac_deployment_foundation-0.2.0a2-py3-none-any.whl", hash = "sha256:ff41ca5816a40c1e1c4030f2af71b8f355d12092f9af371550a214e3fd83826f"},
+    {file = "dotmac_deployment_foundation-0.2.0a2.tar.gz", hash = "sha256:e4d70f4bdd846176ca3b27d9bb6698aed2a1300a47ef6aae78b03b0f5b44f9a3"},
+]
+
+[package.source]
+type = "legacy"
+url = "https://registry.dotmac.io/api/packages/dotmac/pypi/simple"
+reference = "forgejo"
+
+[[package]]
 name = "dotmac-files"
 version = "0.1.0a2"
 description = "DotMac dual-plane stored-object lifecycle and validation"
@@ -1178,6 +1195,27 @@ files = [
 
 [package.dependencies]
 dotmac-kernel = ">=0.1.0a66"
+sqlalchemy = ">=2.0,<3.0"
+
+[package.source]
+type = "legacy"
+url = "https://registry.dotmac.io/api/packages/dotmac/pypi/simple"
+reference = "forgejo"
+
+[[package]]
+name = "dotmac-people"
+version = "0.1.0a2"
+description = "Tenant employment directory, positions, and temporal reporting resolution"
+optional = false
+python-versions = ">=3.11,<3.14"
+groups = ["main"]
+files = [
+    {file = "dotmac_people-0.1.0a2-py3-none-any.whl", hash = "sha256:1c239fe814d82c4e478f0c117816f69a8907a1502b4a9f720d8006643ae1a366"},
+    {file = "dotmac_people-0.1.0a2.tar.gz", hash = "sha256:b62a121aae7fbfa8488431bda8fd462f34480de89e58bfc0b9894bbb881221e6"},
+]
+
+[package.dependencies]
+dotmac-kernel = ">=0.1.0a98"
 sqlalchemy = ">=2.0,<3.0"
 
 [package.source]
@@ -3441,18 +3479,18 @@ yaml = ["pyyaml (>=6.0.1)"]
 
 [[package]]
 name = "pydyf"
-version = "0.12.1"
+version = "0.11.0"
 description = "A low-level PDF generator."
 optional = false
-python-versions = ">=3.10"
+python-versions = ">=3.8"
 groups = ["main"]
 files = [
-    {file = "pydyf-0.12.1-py3-none-any.whl", hash = "sha256:ea25b4e1fe7911195cb57067560daaa266639184e8335365cc3ee5214e7eaadc"},
-    {file = "pydyf-0.12.1.tar.gz", hash = "sha256:fbd7e759541ac725c29c506612003de393249b94310ea78ae44cb1d04b220095"},
+    {file = "pydyf-0.11.0-py3-none-any.whl", hash = "sha256:0aaf9e2ebbe786ec7a78ec3fbffa4cdcecde53fd6f563221d53c6bc1328848a3"},
+    {file = "pydyf-0.11.0.tar.gz", hash = "sha256:394dddf619cca9d0c55715e3c55ea121a9bf9cbc780cdc1201a2427917b86b64"},
 ]
 
 [package.extras]
-doc = ["furo", "sphinx"]
+doc = ["sphinx", "sphinx_rtd_theme"]
 test = ["pillow", "pytest", "ruff"]
 
 [[package]]
@@ -5158,4 +5196,4 @@ cffi = ["cffi (>=1.17,<2.0) ; platform_python_implementation != \"PyPy\" and pyt
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<3.13"
-content-hash = "d396bec722b8972bc6d29dd2c5d6f5369016e2dbdb8f254f7267ec0449f6dd8f"
+content-hash = "518be0f528ffa11ca9214541d8a07bd1b53bd007212218d62ebac02255435477"

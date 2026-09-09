@@ -1,12 +1,12 @@
 {% extends "procurement/base_procurement.html" %}
 
-{%- from "components/macros.html" import compact_filters, filter_select_field, status_badge, pagination, icon_svg %}
+{%- from "components/macros.html" import compact_filters, filter_select_field, status_badge, icon_svg, empty_state %}
 {% block page_title %}Purchase Requisitions{% endblock %}
 
 {% block breadcrumbs %}
 <nav class="text-sm text-slate-500 dark:text-slate-400" aria-label="Breadcrumb">
     <ol class="flex items-center gap-2">
-        <li><a href="/procurement" class="hover:text-amber-600 transition-colors">Procurement</a></li>
+        <li><a href="/procurement" class="hover:text-blue-600 dark:hover:text-blue-400 transition-colors">Procurement</a></li>
         <li class="flex items-center gap-2">{{ icon_svg("chevron-right", "h-4 w-4") }} <span class="font-medium text-slate-900 dark:text-white" aria-current="page">Requisitions</span></li>
     </ol>
 </nav>
@@ -77,30 +77,19 @@
                         </td>
                         <td class="px-4 py-3 text-right font-medium font-mono tabular-nums text-slate-900 dark:text-white">{{ "{:,.2f}".format(req.total_estimated_amount) }}</td>
                         <td class="px-4 py-3">
-                            {% set label, classes = status_labels.get(req.status, ("Unknown", "bg-slate-100 text-slate-700 dark:bg-slate-900/30 dark:text-slate-400")) %}
-                            <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium {{ classes }}">{{ label }}</span>
+                            {{ status_badge(req.status.value if req.status else "UNKNOWN", "sm") }}
                         </td>
                     </tr>
                     {% else %}
                     <tr>
                         <td colspan="5" class="py-12">
-                            <div class="text-center">
-                                {{ icon_svg("document", "mx-auto h-12 w-12 text-slate-300 dark:text-slate-600", stroke_width="1.5") }}
-                                <p class="mt-2 text-sm font-medium text-slate-900 dark:text-white">No requisitions found</p>
-                                <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                                    {% if filter_status or filter_urgency %}
-                                    Try adjusting your filter criteria
-                                    {% else %}
-                                    Get started by submitting your first purchase requisition
-                                    {% endif %}
-                                </p>
-                                {% if not (filter_status or filter_urgency) %}
-                                <a href="/procurement/requisitions/new" class="mt-4 inline-flex items-center btn btn-primary text-sm">
-                                    {{ icon_svg("plus", "h-4 w-4 mr-1.5") }}
-                                    New Requisition
-                                </a>
-                                {% endif %}
-                            </div>
+                            {{ empty_state(
+                                "No requisitions found",
+                                "Try adjusting your filter criteria" if (filter_status or filter_urgency) else "Get started by submitting your first purchase requisition.",
+                                "document",
+                                "New Requisition" if not (filter_status or filter_urgency) else none,
+                                "/procurement/requisitions/new" if not (filter_status or filter_urgency) else none
+                            ) }}
                         </td>
                     </tr>
                     {% endfor %}
@@ -108,14 +97,6 @@
             </table>
         </div>
 
-            {# Pagination #}
-            {{ pagination(
-                page=page,
-                total_pages=total_pages,
-                total_count=total_count,
-                limit=limit,
-                search=search
-            ) }}
         {% if total > limit %}
         <div class="p-4 border-t border-slate-200 dark:border-slate-700 flex justify-between items-center text-sm text-slate-600 dark:text-slate-300">
             <span>Showing {{ offset + 1 }}-{{ [offset + limit, total] | min }} of {{ total }}</span>

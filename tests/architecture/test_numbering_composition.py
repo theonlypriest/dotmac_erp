@@ -4,6 +4,8 @@ This is the static half of the composition proof.  The PostgreSQL rehearsal in
 `tests/integration/test_accounting_lineage_composition.py` proves the migration
 and live catalog; these tests prove the exact artifact, revision location,
 assembly-selected plane and absence of a runtime dependency under `app/`.
+The release-only product assembly may import exactly
+`dotmac_numbering.manifest`; that declarative seam is not a runtime caller.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from app.migration_planes import ASSEMBLY_MODULE_PLANES
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 APP_ROOT = REPO_ROOT / "app"
+PRODUCT_ASSEMBLY = APP_ROOT / "product_assembly.py"
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 LOCK = REPO_ROOT / "poetry.lock"
 ALEMBIC_INI = REPO_ROOT / "alembic.ini"
@@ -54,6 +57,13 @@ def _imported_modules(path: Path) -> set[str]:
         elif isinstance(node, ast.ImportFrom) and node.module:
             modules.add(node.module)
     return modules
+
+
+def _is_numbering_runtime_import(path: Path, module: str) -> bool:
+    """Only the product assembly may consume the declarative manifest."""
+    if module != IMPORT_PACKAGE and not module.startswith(f"{IMPORT_PACKAGE}."):
+        return False
+    return path != PRODUCT_ASSEMBLY or module != f"{IMPORT_PACKAGE}.manifest"
 
 
 def test_the_distribution_is_pinned_exactly_from_the_private_source() -> None:
@@ -111,13 +121,31 @@ def test_alembic_installs_the_plane_selection_before_revision_loading() -> None:
 
 
 def test_nothing_under_app_imports_the_numbering_runtime() -> None:
-    """Storage composition must not silently repoint a business caller."""
+    """Storage composition must not silently repoint a business caller.
+
+    `app.product_assembly` may import the declarative package manifest to bind
+    release identity. Any model, service or manifest submodule remains a
+    runtime import and is rejected by the same scan.
+    """
     offenders = sorted(
         path.relative_to(REPO_ROOT).as_posix()
         for path in APP_ROOT.rglob("*.py")
         if any(
-            module == IMPORT_PACKAGE or module.startswith(f"{IMPORT_PACKAGE}.")
+            _is_numbering_runtime_import(path, module)
             for module in _imported_modules(path)
         )
     )
     assert not offenders, f"app/ imports {IMPORT_PACKAGE}: {offenders}"
+
+
+def test_numbering_manifest_seam_is_narrow_and_runtime_sensitive() -> None:
+    other_path = APP_ROOT / "services" / "example.py"
+    assert not _is_numbering_runtime_import(
+        PRODUCT_ASSEMBLY, "dotmac_numbering.manifest"
+    )
+    assert _is_numbering_runtime_import(other_path, "dotmac_numbering.manifest")
+    assert _is_numbering_runtime_import(PRODUCT_ASSEMBLY, "dotmac_numbering")
+    assert _is_numbering_runtime_import(PRODUCT_ASSEMBLY, "dotmac_numbering.service")
+    assert _is_numbering_runtime_import(
+        PRODUCT_ASSEMBLY, "dotmac_numbering.manifest.private"
+    )

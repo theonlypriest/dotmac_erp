@@ -56,6 +56,28 @@
     </div>
     {% endif %}
 
+    <div class="admin-card p-6 space-y-4">
+        <div>
+            <h2 class="text-lg font-semibold text-slate-900 dark:text-white">Inbound webhook and Selfcare relay</h2>
+            <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">This provider callback is inbound. It is not an ERP outbound Service Hook.</p>
+        </div>
+        <div>
+            <label class="block text-sm font-medium text-slate-700 dark:text-slate-300">URL to configure in Paystack</label>
+            <div class="mt-1 rounded-lg bg-slate-100 px-4 py-3 font-mono text-sm text-slate-800 break-all dark:bg-slate-900 dark:text-slate-200">{{ paystack_webhook_url }}</div>
+        </div>
+        <dl class="grid gap-3 text-sm sm:grid-cols-2">
+            <div>
+                <dt class="font-medium text-slate-700 dark:text-slate-300">ERP behavior</dt>
+                <dd class="mt-1 text-slate-500 dark:text-slate-400">Verify Paystack's signature; process ERP references locally.</dd>
+            </div>
+            <div>
+                <dt class="font-medium text-slate-700 dark:text-slate-300">Dotmac Sub behavior</dt>
+                <dd class="mt-1 text-slate-500 dark:text-slate-400">Relay verified <span class="font-mono">DMAC-*</span> charges to <span class="font-mono">{{ paystack_relay_path }}</span>.</dd>
+            </div>
+        </dl>
+        <p class="text-xs text-slate-500 dark:text-slate-400">The webhook ingress rate-limit override is owned and adjusted in Dotmac Sub's Payment Gateway integration page.</p>
+    </div>
+
     <form method="POST" action="/admin/settings/payments/paystack" class="space-y-6">
         {{ request.state.csrf_form | safe }}
         <!-- Enable/Disable -->

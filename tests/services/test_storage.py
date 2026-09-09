@@ -126,11 +126,33 @@ class TestExists:
         S3Error = svc._s3_error
 
         mock_minio_client.stat_object.side_effect = S3Error(
-            "NoSuchKey", "Object does not exist", "", "", "", ""
+            MagicMock(), "NoSuchKey", "Object does not exist", "", "", ""
         )
 
         with patch.object(storage_mod, "_get_client", return_value=mock_minio_client):
             assert svc.exists("avatars/missing.jpg") is False
+
+    def test_exists_does_not_turn_provider_failure_into_absence(
+        self, svc, mock_minio_client
+    ):
+        S3Error = svc._s3_error
+        failure = S3Error(
+            MagicMock(),
+            "ServiceUnavailable",
+            "Provider is unavailable",
+            "",
+            "",
+            "",
+        )
+        mock_minio_client.stat_object.side_effect = failure
+
+        with (
+            patch.object(storage_mod, "_get_client", return_value=mock_minio_client),
+            pytest.raises(S3Error) as raised,
+        ):
+            svc.exists("avatars/photo.jpg")
+
+        assert raised.value is failure
 
 
 class TestEnsureBucket:

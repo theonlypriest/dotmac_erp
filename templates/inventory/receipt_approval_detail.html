@@ -1,5 +1,5 @@
 {% extends "inventory/base_inventory.html" %}
-{% from "components/macros.html" import icon_svg %}
+{% from "components/macros.html" import icon_svg, status_badge %}
 
 {% block page_title %}Receipt Approval{% endblock %}
 
@@ -28,13 +28,7 @@
                     <span class="mt-1 block font-mono text-lg font-semibold text-slate-900 dark:text-white">{{ approval.invoice_number }}</span>
                     <p class="mt-1 text-sm text-slate-700 dark:text-slate-200">{{ approval.supplier_name }}</p>
                 </div>
-                {% set status_classes = {
-                    "PENDING": "bg-amber-50 text-amber-700 ring-amber-200 dark:bg-amber-900/20 dark:text-amber-300 dark:ring-amber-800",
-                    "PARTIALLY_RECEIVED": "bg-blue-50 text-blue-700 ring-blue-200 dark:bg-blue-900/20 dark:text-blue-300 dark:ring-blue-800",
-                    "POSTED_TO_INVENTORY": "bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-900/20 dark:text-emerald-300 dark:ring-emerald-800",
-                    "REJECTED": "bg-rose-50 text-rose-700 ring-rose-200 dark:bg-rose-900/20 dark:text-rose-300 dark:ring-rose-800"
-                } %}
-                <span class="inline-flex w-fit rounded-full px-3 py-1 text-xs font-semibold ring-1 {{ status_classes.get(approval.status, 'bg-slate-50 text-slate-700 ring-slate-200') }}">{{ approval.status | replace("_", " ") | title }}</span>
+                {{ status_badge(approval.status, "sm") }}
             </div>
 
             <dl class="mt-6 grid gap-4 sm:grid-cols-2">
@@ -68,7 +62,7 @@
                 </div>
                 <div>
                     <dt class="text-xs font-medium uppercase tracking-wide text-slate-500">Receipt Reference</dt>
-                    <dd class="mt-1 text-sm text-slate-900 dark:text-white">{{ approval.receipt_reference if approval.receipt_reference else "None" }}</dd>
+                    <dd class="mt-1 text-sm text-slate-900 dark:text-white">{{ approval.receipt_reference if approval.receipt_reference is not none and approval.receipt_reference else "—" }}</dd>
                 </div>
                 <div>
                     <dt class="text-xs font-medium uppercase tracking-wide text-slate-500">Inventory Transaction</dt>
@@ -151,6 +145,12 @@
                                 {% else %}
                                 -
                                 {% endif %}
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="5" class="py-10 text-center text-sm text-slate-500 dark:text-slate-400">
+                                No receipt history has been recorded for this invoice line.
                             </td>
                         </tr>
                         {% endfor %}

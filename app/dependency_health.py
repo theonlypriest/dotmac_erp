@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-import logging
 import os
 
 import httpx
-from sqlalchemy import select
+from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import SessionLocal
-from app.models.domain_settings import DomainSetting, SettingDomain
+from app.models.domain_settings import SettingDomain
 from app.services.email import _get_smtp_config, validate_smtp_config
 from app.services.finance.payments.paystack_client import (
     PaystackClient,
@@ -24,11 +23,14 @@ from app.services.nextcloud.client import (
 )
 from app.services.remita.client import REMITA_DEMO_URL, REMITA_LIVE_URL, RemitaClient
 from app.services.secrets import _openbao_allow_insecure, _openbao_config
-from app.services.settings_spec import coerce_value, get_spec
+from app.services.settings_spec import (
+    DOMAIN_SETTINGS_SERVICE,
+    extract_db_value,
+    get_spec,
+    resolve_value,
+)
 from app.services.dotmac_sub import DotmacSubClient, DotmacSubConfig
 from app.services.storage import _get_client as _get_storage_client
-
-logger = logging.getLogger(__name__)
 
 DEFAULT_REQUIRED_DEPENDENCIES = frozenset({"storage", "openbao"})
 
@@ -104,45 +106,40 @@ def _result(
     return payload
 
 
-def _raw_domain_setting(db: Session, domain: SettingDomain, key: str) -> object | None:
-    setting = db.scalar(
-        select(DomainSetting).where(
-            DomainSetting.domain == domain,
-            DomainSetting.key == key,
-            DomainSetting.is_active.is_(True),
-        )
-    )
-    if setting is None:
+def _global_stored_setting(
+    db: Session, domain: SettingDomain, key: str
+) -> object | None:
+    """Read an explicitly global row through the canonical settings owner.
+
+    Readiness has no organization context, so it cannot inspect an arbitrary
+    tenant's override. Environment-backed values have already been loaded into
+    settings rows at process start; this path deliberately observes the row
+    owned by the settings service rather than resolving the environment again.
+    """
+    service = DOMAIN_SETTINGS_SERVICE.get(domain)
+    if service is None:
         return None
-    if setting.value_json is not None:
-        return setting.value_json
-    return setting.value_text
+    spec = get_spec(domain, key)
+    try:
+        setting = service.get_by_key(
+            db,
+            key,
+            organization_id=None,
+            inherit=spec.inherits if spec else True,
+        )
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
+        return None
+    return extract_db_value(setting)
 
 
 def _setting_value(db: Session, domain: SettingDomain, key: str) -> object | None:
-    spec = get_spec(domain, key)
-    raw = _raw_domain_setting(db, domain, key)
-    if raw is None and spec and spec.env_var:
-        raw = os.getenv(spec.env_var)
-    if raw is None and spec:
-        raw = spec.default
-    if spec is None:
-        return raw
-    value, error = coerce_value(spec, raw)
-    if error:
-        logger.warning("Invalid setting value for %s/%s: %s", domain.value, key, error)
-        return spec.default
-    return value
+    return resolve_value(db, domain, key, organization_id=None)
 
 
 def _setting_configured(db: Session, domain: SettingDomain, key: str) -> bool:
-    if _raw_domain_setting(db, domain, key) not in {None, ""}:
-        return True
-    spec = get_spec(domain, key)
-    if not spec or not spec.env_var:
-        return False
-    value = os.getenv(spec.env_var)
-    return value is not None and value != ""
+    return _global_stored_setting(db, domain, key) not in {None, ""}
 
 
 def _check_smtp(db: Session) -> dict[str, object]:
@@ -157,7 +154,9 @@ def _check_smtp(db: Session) -> dict[str, object]:
             message="SMTP is not configured",
         )
 
-    ok, error = validate_smtp_config(_get_smtp_config(db), timeout_seconds=5)
+    ok, error = validate_smtp_config(
+        _get_smtp_config(db, organization_id=None), timeout_seconds=5
+    )
     return _result(
         configured=True,
         healthy=ok,
@@ -278,7 +277,7 @@ def _check_paystack(db: Session) -> dict[str, object]:
 
 
 def _check_nextcloud(db: Session) -> dict[str, object]:
-    configured = is_configured(db)
+    configured = is_configured(db, organization_id=None)
     if not configured:
         return _result(
             configured=False,
@@ -287,7 +286,7 @@ def _check_nextcloud(db: Session) -> dict[str, object]:
         )
 
     try:
-        config = NextcloudConfig.from_db(db)
+        config = NextcloudConfig.from_db(db, organization_id=None)
         client = NextcloudTalkClient(
             NextcloudConfig(
                 server_url=config.server_url,

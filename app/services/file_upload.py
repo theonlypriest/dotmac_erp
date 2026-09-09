@@ -211,6 +211,12 @@ class FileUploadError(Exception):
     pass
 
 
+class FileStorageError(FileUploadError):
+    """The configured object store could not durably accept the file."""
+
+    pass
+
+
 class InvalidContentTypeError(FileUploadError):
     """Content type is not allowed."""
 
@@ -436,8 +442,12 @@ class FileUploadService:
         relative_path = "/".join(rel_parts)
 
         # Upload to S3
-        storage = self._get_storage()
-        storage.upload(s3_key, file_data, content_type)
+        try:
+            storage = self._get_storage()
+            storage.upload(s3_key, file_data, content_type)
+        except Exception as exc:
+            logger.error("Object storage upload failed for key %s", s3_key)
+            raise FileStorageError("Object storage upload failed") from exc
 
         # Optional checksum
         checksum: str | None = None
@@ -991,6 +1001,30 @@ def _generated_docs_config() -> FileUploadConfig:
     )
 
 
+def _hr_handbook_config() -> FileUploadConfig:
+    return FileUploadConfig(
+        base_dir="uploads/hr_documents",
+        # The legacy handbook contract admits these extensions without making
+        # a browser-supplied content type authoritative.
+        allowed_content_types=frozenset(),
+        allowed_extensions=frozenset({".pdf", ".doc", ".docx", ".txt", ".rtf"}),
+        max_size_bytes=10 * 1024 * 1024,
+        compute_checksum=True,
+        s3_prefix="hr_documents",
+    )
+
+
+def _generated_report_config() -> FileUploadConfig:
+    return FileUploadConfig(
+        base_dir="reports_output",
+        allowed_content_types=frozenset({"application/json"}),
+        allowed_extensions=frozenset({".json"}),
+        max_size_bytes=50 * 1024 * 1024,
+        compute_checksum=True,
+        s3_prefix="generated_reports",
+    )
+
+
 def get_expense_receipt_upload() -> FileUploadService:
     """Get expense receipt upload service."""
     return FileUploadService(_expense_receipt_config())
@@ -1014,3 +1048,13 @@ def get_fleet_maintenance_attachment_upload() -> FileUploadService:
 def get_generated_docs_upload() -> FileUploadService:
     """Get generated documents upload service."""
     return FileUploadService(_generated_docs_config())
+
+
+def get_hr_handbook_upload() -> FileUploadService:
+    """Get the durable HR handbook object upload service."""
+    return FileUploadService(_hr_handbook_config())
+
+
+def get_generated_report_upload() -> FileUploadService:
+    """Get the durable generated-report object upload service."""
+    return FileUploadService(_generated_report_config())

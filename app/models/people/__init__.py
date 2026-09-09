@@ -42,6 +42,20 @@ from app.models.people.attendance import (
     AttendanceStatus,
     ShiftType,
 )
+from app.models.people.scheduling import (
+    RotationType,
+    ScheduleAuditAction,
+    ScheduleAuditEvent,
+    ScheduleNotificationLog,
+    ScheduleStatus,
+    SchedulingPolicy,
+    ShiftPattern,
+    ShiftPatternAssignment,
+    ShiftSchedule,
+    ShiftSwapRequest,
+    SwapRequestStatus,
+    WorkSchedule,
+)
 from app.models.people.base import (
     AuditMixin,
     ERPNextSyncMixin,
@@ -88,6 +102,10 @@ from app.models.people.hr import (
     EmployeeStatus,
     EmploymentType,
     Gender,
+    StaffAccountStatusProjection,
+    StaffAccountStatusState,
+    StaffLeaveAccessRestriction,
+    StaffLeaveRestrictionStatus,
 )
 
 # Leave Models
@@ -196,6 +214,10 @@ __all__ = [
     "Employee",
     "EmployeeGrade",
     "EmployeeStatus",
+    "StaffAccountStatusProjection",
+    "StaffAccountStatusState",
+    "StaffLeaveAccessRestriction",
+    "StaffLeaveRestrictionStatus",
     "EmploymentType",
     "Gender",
     # Payroll
@@ -224,6 +246,19 @@ __all__ = [
     "ShiftType",
     "Attendance",
     "AttendanceStatus",
+    # Scheduling
+    "RotationType",
+    "ScheduleAuditAction",
+    "ScheduleAuditEvent",
+    "ScheduleNotificationLog",
+    "ScheduleStatus",
+    "SchedulingPolicy",
+    "ShiftPattern",
+    "ShiftPatternAssignment",
+    "ShiftSchedule",
+    "ShiftSwapRequest",
+    "SwapRequestStatus",
+    "WorkSchedule",
     # Recruitment
     "JobOpening",
     "JobOpeningStatus",

@@ -1,17 +1,20 @@
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
+from starlette.requests import Request
 
 from app.models.people.payroll.salary_slip import SalarySlipStatus
 from app.services.people.payroll.payroll_service import (
     PayrollService,
     PayrollServiceError,
 )
+from app.services.people.payroll.web import report_web
 
 
 def _make_execute_result(return_rows):
@@ -78,6 +81,108 @@ def test_get_payroll_ytd_report_aggregates_totals_and_names():
 
     assert result["rows"][0]["employee_name"] == "Ada Lovelace"
     assert result["rows"][1]["employee_name"] == "Grace Hopper"
+
+
+def test_get_payroll_tax_summary_groups_deduction_lines_by_component():
+    org_id = uuid4()
+    rows = [
+        SimpleNamespace(
+            component_id=uuid4(),
+            component_name="PAYE Tax",
+            component_code="PAYE",
+            is_statutory=True,
+            deduction_count=2,
+            total_amount=Decimal("250.00"),
+        ),
+        SimpleNamespace(
+            component_id=uuid4(),
+            component_name="Staff Loan",
+            component_code="LOAN",
+            is_statutory=False,
+            deduction_count=1,
+            total_amount=Decimal("75.00"),
+        ),
+    ]
+    db = MagicMock()
+    db.execute.return_value = _make_execute_result(rows)
+
+    result = PayrollService(db).get_payroll_tax_summary_report(
+        org_id,
+        start_date=date(2026, 3, 1),
+        end_date=date(2026, 3, 31),
+    )
+
+    assert result["statutory_total"] == Decimal("250.00")
+    assert result["non_statutory_total"] == Decimal("75.00")
+    assert result["total_deductions"] == Decimal("325.00")
+    assert result["deductions"] == [
+        {
+            "component_id": str(rows[0].component_id),
+            "component_name": "PAYE Tax",
+            "component_code": "PAYE",
+            "is_statutory": True,
+            "deduction_count": 2,
+            "total_amount": Decimal("250.00"),
+            "percentage": 76.9,
+        },
+        {
+            "component_id": str(rows[1].component_id),
+            "component_name": "Staff Loan",
+            "component_code": "LOAN",
+            "is_statutory": False,
+            "deduction_count": 1,
+            "total_amount": Decimal("75.00"),
+            "percentage": 23.1,
+        },
+    ]
+
+
+def test_tax_summary_report_uses_the_submitted_date_range(monkeypatch):
+    org_id = uuid4()
+    report = {
+        "start_date": date(2026, 3, 1),
+        "end_date": date(2026, 3, 31),
+        "deductions": [],
+        "statutory_total": Decimal("0"),
+        "non_statutory_total": Decimal("0"),
+        "total_deductions": Decimal("0"),
+    }
+    captured: dict = {}
+
+    def _tax_summary(_self, received_org_id, **kwargs):
+        captured["organization_id"] = received_org_id
+        captured.update(kwargs)
+        return report
+
+    monkeypatch.setattr(PayrollService, "get_payroll_tax_summary_report", _tax_summary)
+    monkeypatch.setattr(report_web, "base_context", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        report_web.templates,
+        "TemplateResponse",
+        lambda _request, _name, context: context,
+    )
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/people/payroll/reports/tax-summary",
+            "query_string": b"start_date=2026-03-01&end_date=2026-03-31",
+            "headers": [],
+        }
+    )
+
+    context = report_web.ReportWebService().tax_summary_report_response(
+        request,
+        SimpleNamespace(organization_id=str(org_id)),
+        MagicMock(),
+    )
+
+    assert captured == {
+        "organization_id": org_id,
+        "start_date": date(2026, 3, 1),
+        "end_date": date(2026, 3, 31),
+    }
+    assert context["report"] is report
 
 
 def test_approve_payroll_entry_fails_when_loan_posting_fails(monkeypatch):

@@ -181,7 +181,7 @@ hr	employee_skill	direct	false	false	app_admin	0	false	--	--
 hr	employee_transfer	direct	false	false	app_admin	0	false	--	--
 hr	employee_transfer_detail	inherited	false	false	app_admin	0	false	--	--
 hr	employment_contract	direct	false	false	app_admin	0	false	--	--
-hr	employment_type	direct	true	true	app_admin	4	true	--	--
+hr	employment_type	direct	true	true	app_admin	4	true	rw	--
 hr	exit_interview	direct	false	false	app_admin	0	false	--	--
 hr	grievance	direct	false	false	app_admin	0	false	--	--
 hr	hr_document	direct	false	false	app_admin	0	false	--	--
@@ -191,6 +191,8 @@ hr	job_description_competency	inherited	false	false	app_admin	0	false	--	--
 hr	position	direct	false	false	app_admin	0	false	--	--
 hr	position_assignment	direct	false	false	app_admin	0	false	--	--
 hr	salary_review	direct	false	false	app_admin	0	false	--	--
+hr	staff_account_status_projection	direct	true	true	app_admin	1	false	rw	--
+hr	staff_leave_access_restriction	direct	true	true	app_admin	1	false	rw	--
 hr	skill	direct	false	false	app_admin	0	false	--	--
 hr	succession_candidate	direct	false	false	app_admin	0	false	--	--
 hr	succession_plan	direct	false	false	app_admin	0	false	--	--
@@ -260,6 +262,12 @@ mod_numbering	allocation_receipts	direct	true	true	app_admin	1	false	rw	rw
 mod_numbering	number_series	direct	true	true	app_admin	1	false	rw	rw
 mod_numbering	series_counters	direct	true	true	app_admin	1	false	rw	rw
 mod_numbering	series_repairs	direct	true	true	app_admin	1	false	rw	rw
+mod_people	departments	direct	true	true	app_admin	1	false	rw	--
+mod_people	designations	direct	true	true	app_admin	1	false	rw	--
+mod_people	employees	direct	true	true	app_admin	1	false	rw	--
+mod_people	employment_types	direct	true	true	app_admin	1	false	rw	--
+mod_people	position_assignments	direct	true	true	app_admin	1	false	rw	--
+mod_people	positions	direct	true	true	app_admin	1	false	rw	--
 mod_tax	statutory_report_boxes	direct	true	true	app_admin	1	false	rw	--
 mod_tax	statutory_report_definitions	direct	true	true	app_admin	1	false	rw	--
 mod_tax	statutory_report_values	direct	true	true	app_admin	1	false	rw	--

@@ -322,10 +322,14 @@ SELECTED: Final[tuple[SelectedModule, ...]] = (
     ),
     SelectedModule(
         distribution="dotmac-people",
-        state="selected",
+        state="composed",
         release_state="released",
         capabilities=("employment-directory",),
         rationale=(
+            "The six-table tenant storage lineage and one explicit operator-only "
+            "Employment Type bootstrap are composed with no runtime authority "
+            "transfer. Legacy People writers remain the only authority until a "
+            "domain-by-domain cutover. "
             "Six tables of employment identity. The legacy employee hub's exact "
             "ORM dependency intents are ledgered by FK identity in "
             "docs/inventories/people-dependent-references.tsv; "
@@ -1454,8 +1458,8 @@ COMPOSITION_PLAN: Final[tuple[CompositionStep, ...]] = (
     #    would silently rewrite what an earlier review approved.
     CompositionStep(
         distribution="dotmac-people",
-        tranche=1,
-        kernel_floor="0.1.0a71",
+        tranche=0,
+        kernel_floor="0.1.0a98",
         schema="mod_people",
         lineage_branch="people",
         lineage_head="pe_0001_people_directory",
@@ -1539,12 +1543,12 @@ COMPOSITION_PLAN: Final[tuple[CompositionStep, ...]] = (
     ),
 )
 
-#: The highest kernel floor the SELECTED set demands, from `dotmac-payments`.
-#: ERP pins 0.1.0a85, so composing tranche 1 requires a kernel repin first.
+#: The highest kernel floor the SELECTED set demands, from `dotmac-people` a2.
+#: ERP pins that exact 0.1.0a98 floor, so every selected release is loadable.
 #: This is a measured property of the plan, restated as a constant so the
 #: repin is a visible obligation rather than something discovered by a
 #: resolver error.
-KERNEL_FLOOR_DEMANDED_BY_SELECTION: Final = "0.1.0a91"
+KERNEL_FLOOR_DEMANDED_BY_SELECTION: Final = "0.1.0a98"
 
 #: Effects a selected module needs that this assembly does not supply. Each is
 #: a new assembly migration ERP must write before the modules listed can be

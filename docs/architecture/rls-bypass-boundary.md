@@ -271,10 +271,16 @@ direct login where a deployment provides one, and refuses a URL carrying a
 password: credentials go in `PGPASSWORD`, as the CI bootstrap step already
 does.
 
-Today's measurement is almost entirely `denied-no-grant`: no migration issues a
-table-level `GRANT … TO app_user`, only `EXECUTE` on two functions, so
-`app_user` holds `SELECT` on 1 of 420 relations. That produces four honest
-limits the module's own docstring carries:
+The original measurement was almost entirely `denied-no-grant`. At the current
+design head, composed modules and hosted prerequisite surfaces already give
+`app_user` `SELECT` on 48 of the 474 catalogued relations, including the forced-
+RLS `hr.employment_type` compatibility projection. Employment Type activation
+replaces the predecessor's read-and-lock bootstrap surface: the lock helper is
+dropped, and the same role gains `INSERT`/`UPDATE` only for the one synchronous
+projector while `DELETE`, `TRUNCATE`, table/column `REFERENCES`, and `TRIGGER`
+stay absent. The separate activation privilege test checks that write boundary;
+the cross-organization read ledger remains unchanged. That produces four honest
+limits the measurement module's docstring carries:
 
 - **An unprotected row is not proved reachable.** Every one has an unreachable
   target, recorded as a two-directional ratchet beside its own assertion rather

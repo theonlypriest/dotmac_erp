@@ -58,8 +58,8 @@ class ExpenseLimitWebService:
         db: Session,
     ) -> HTMLResponse:
         """Show expense limit categories."""
-        context = base_context(request, auth, "Expense Limit", "limits", db=db)
-        return templates.TemplateResponse(request, "expense/limits/list.html", context)
+        context = base_context(request, auth, "Spending Limits", "limits", db=db)
+        return templates.TemplateResponse(request, "expense/limits/index.html", context)
 
     @staticmethod
     def _get_approver_scope_id(form, scope_type: str) -> str:

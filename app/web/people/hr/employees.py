@@ -52,6 +52,32 @@ def list_employees(
     )
 
 
+@router.get("/employees/export", response_class=Response)
+def export_employees(
+    fields: list[str] = Query(default=[]),
+    status: str | None = None,
+    department_id: str | None = None,
+    designation_id: str | None = None,
+    date_of_joining_from: str | None = None,
+    date_of_joining_to: str | None = None,
+    include_archived: bool = False,
+    auth: WebAuthContext = Depends(require_hr_access),
+    db: Session = Depends(get_db_for_org),
+):
+    """Download a configurable, tenant-scoped employee CSV export."""
+    return hr_web_service.export_employees_csv_response(
+        auth=auth,
+        db=db,
+        fields=fields,
+        status=status,
+        department_id=department_id,
+        designation_id=designation_id,
+        date_of_joining_from=date_of_joining_from,
+        date_of_joining_to=date_of_joining_to,
+        include_archived=include_archived,
+    )
+
+
 @router.get("/employees/org-chart", include_in_schema=False)
 def view_org_chart_redirect() -> RedirectResponse:
     return RedirectResponse(url="/people/hr/org-chart", status_code=301)

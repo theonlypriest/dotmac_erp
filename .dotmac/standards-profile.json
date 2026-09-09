@@ -113,19 +113,19 @@
         "path": "tests/services/test_dotmac_sub_incremental_sync.py",
         "symbol": "test_customer_feeds_forward_their_watermarks",
         "category": "sync_checkpoint",
-        "fingerprint": "c60a65c1214a478fd7909fe746b7c3b6d607b4d074ae09ceddaa9cbd1e301c41"
+        "fingerprint": "ced5e1214b2e8731e79f877ec620f2d3333f80244fc07284dabdf7aa91b99ef3"
       },
       {
         "path": "tests/services/test_dotmac_sub_sync.py",
         "symbol": "test_verify_webhook_signature",
         "category": "webhook_surface",
-        "fingerprint": "7a87e6ab27b39d6e01e49ccac47818926bce03ed12bd764665023a16a583c57c"
+        "fingerprint": "18b2cccff0f9d19c688adbfe3714dfbcfb494ccf55fb00fea58047b2c0babd3d"
       },
       {
         "path": "tests/services/test_dotmac_sub_sync.py",
         "symbol": "test_verify_webhook_signature_unconfigured",
         "category": "webhook_surface",
-        "fingerprint": "7a87e6ab27b39d6e01e49ccac47818926bce03ed12bd764665023a16a583c57c"
+        "fingerprint": "18b2cccff0f9d19c688adbfe3714dfbcfb494ccf55fb00fea58047b2c0babd3d"
       },
       {
         "path": "tests/services/test_hook_registry.py",

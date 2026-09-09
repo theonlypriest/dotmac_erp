@@ -457,7 +457,7 @@ UNDISPOSITIONED: Mapping[tuple[str, str], str] = {
 RESOLUTION_CENSUS: Mapping[str, int] = {
     "fix": 117,
     "isolate": 18,
-    "retire_with_domain_cutover": 9,
+    "retire_with_domain_cutover": 2,
     "disable": 0,
     "undecided": 3,
 }
@@ -541,8 +541,19 @@ def test_the_app_user_blocker_count_is_a_two_directional_ratchet() -> None:
     operator API has no tenant to iterate, because the cross-tenant query IS
     the question. All four are now ``isolate``, which is what that refutation
     was always saying.
+
+    -> 49 (seven finance, banking and expense sweeps converted to the tenant
+    catalogue: the two expense sweeps, the banking auto-match, and finance's
+    depreciation, Mono transaction, balance-refresh and stock-reservation
+    jobs).  ``refresh_analysis_cubes`` was examined in the same pass and
+    REFUTED again: ``rpt.analysis_cube.organization_id`` is NULLABLE, so a
+    fan-out would permanently orphan every fleet-wide cube.  It stays
+    ``undecided`` and stays in :data:`UNDISPOSITIONED`, for the reason recorded
+    there.  ``sync_mono_account`` and ``_resolve_report_instance_org`` keep
+    their rows too: both resolve WHICH tenant owns one given row, which is
+    tenant resolution, not tenant enumeration.
     """
-    baseline = 56
+    baseline = 49
     blocked = [
         f"{row['path']}::{row['symbol']}"
         for row in _inventory_rows()

@@ -198,8 +198,42 @@ def handle_ledger_posting_completed(db: Session, event: Any) -> None:
     )
 
 
+def handle_staff_access_projection_changed(db: Session, event: Any) -> None:
+    """Bridge ERP staff access projection events into configured service hooks."""
+    payload = event.payload or {}
+    org_raw = payload.get("organization_id")
+    aggregate_id = event.aggregate_id
+    if not org_raw or not aggregate_id:
+        raise NonRetryableEventError(
+            f"{event.event_name} event {event.event_id} is missing organization "
+            "or aggregate id"
+        )
+
+    from app.services.hooks.registry import emit_hook_event
+
+    actor_raw = (event.headers or {}).get("user_id")
+    actor_user_id = UUID(str(actor_raw)) if actor_raw else None
+    emit_hook_event(
+        db,
+        event_name=event.event_name,
+        organization_id=UUID(str(org_raw)),
+        entity_type=event.aggregate_type,
+        entity_id=UUID(str(aggregate_id)),
+        actor_user_id=actor_user_id,
+        payload=payload,
+    )
+
+
 # Register built-in handlers
 register_handler("ledger.posting.completed", handle_ledger_posting_completed)
+register_handler(
+    "hr.staff_leave_restriction.changed",
+    handle_staff_access_projection_changed,
+)
+register_handler(
+    "hr.staff_account_status.changed",
+    handle_staff_access_projection_changed,
+)
 
 
 # ---------------------------------------------------------------------------

@@ -1,13 +1,13 @@
 {% extends "people/base_people.html" %}
 {% from "components/macros.html" import icon_svg, status_badge %}
 
-{% block page_title %}My Tax & Bank Information{% endblock %}
+{% block page_title %}My Personal Info{% endblock %}
 
 {% block breadcrumbs %}
 <nav class="text-sm text-slate-500 dark:text-slate-400" aria-label="Breadcrumb">
     <ol class="flex">
         <li><a href="/dashboard" class="hover:text-teal-600 dark:hover:text-teal-400 transition-colors">Dashboard</a></li>
-        <li class="flex items-center"><span class="mx-2">/</span> <a href="/people/self/attendance" class="hover:text-teal-600 dark:hover:text-teal-400 transition-colors">Self Service</a></li>
+        <li class="flex items-center"><span class="mx-2">/</span> <a href="/people/self" class="hover:text-teal-600 dark:hover:text-teal-400 transition-colors">Self Service</a></li>
         <li class="flex items-center"><span class="mx-2">/</span> <span class="text-slate-900 dark:text-white" aria-current="page">Tax & Bank Info</span></li>
     </ol>
 </nav>
@@ -17,8 +17,8 @@
 <div class="mx-auto max-w-4xl space-y-8" x-data="{ personalDetailsOpen: false }">
     <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
-            <h2 class="text-2xl font-semibold text-slate-900 dark:text-white">My Tax & Bank Information</h2>
-            <p class="text-sm text-slate-500 dark:text-slate-400">Update your statutory and payment information for payroll processing.</p>
+            <h2 class="text-2xl font-semibold text-slate-900 dark:text-white">My Personal Info</h2>
+            <p class="text-sm text-slate-500 dark:text-slate-400">Review and edit personal, bank, and tax information.</p>
         </div>
         {% if has_pending %}
         <div class="inline-flex items-center gap-2 self-start rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-sm font-medium text-amber-700 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-300">
@@ -127,22 +127,6 @@
                     Your latest change request is still pending review, so new changes are temporarily disabled.
                 </div>
                 {% endif %}
-            </div>
-        </div>
-    </div>
-
-    <div class="card p-6">
-        <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-                <h2 class="text-lg font-semibold text-slate-900 dark:text-white">Extended Profile</h2>
-                <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Qualifications, certifications, skills, and dependant updates are submitted separately for HR approval.</p>
-            </div>
-            <div class="flex flex-wrap gap-2">
-                <a href="/people/self/qualifications" class="btn btn-secondary">Qualifications</a>
-                <a href="/people/self/certifications" class="btn btn-secondary">Certifications</a>
-                <a href="/people/self/skills" class="btn btn-secondary">Skills</a>
-                <a href="/people/self/dependents" class="btn btn-secondary">Dependants</a>
-                <a href="/people/self/documents" class="btn btn-secondary">My Documents</a>
             </div>
         </div>
     </div>

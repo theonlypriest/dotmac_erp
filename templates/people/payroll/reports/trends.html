@@ -201,7 +201,9 @@
                                 {{ "{:.0f}".format(variance) }}%
                             </span>
                             {% else %}
-                            <span class="text-sm text-slate-500 dark:text-slate-400">~</span>
+                            <span class="text-sm font-mono tabular-nums text-slate-600 dark:text-slate-400">
+                                {% if variance > 0 %}+{% endif %}{{ "{:.0f}".format(variance) }}%
+                            </span>
                             {% endif %}
                             {% else %}
                             <span class="text-sm text-slate-500 dark:text-slate-400">-</span>

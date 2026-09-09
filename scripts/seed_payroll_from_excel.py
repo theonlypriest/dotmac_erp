@@ -11,13 +11,13 @@ This script:
 7. Seeds NTA 2025 tax bands
 
 Usage:
-    poetry run python scripts/seed_payroll_from_excel.py
+    poetry run python scripts/seed_payroll_from_excel.py --organization-id <organization-uuid>
 
     # To match existing employees only (no new creations):
-    poetry run python scripts/seed_payroll_from_excel.py --match-only
+    poetry run python scripts/seed_payroll_from_excel.py --organization-id <organization-uuid> --match-only
 
     # To see what would happen without making changes:
-    poetry run python scripts/seed_payroll_from_excel.py --dry-run
+    poetry run python scripts/seed_payroll_from_excel.py --organization-id <organization-uuid> --dry-run
 """
 
 import argparse
@@ -36,12 +36,11 @@ import openpyxl
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
-from app.db import SessionLocal
+from app.db.session_context import session_for_org
 from app.models.batch_operation import BatchOperation, BatchOperationType
 from app.models.people.hr.department import Department
 from app.models.people.hr.designation import Designation
 from app.models.people.hr.employee import Employee, EmployeeStatus
-from app.models.people.hr.employment_type import EmploymentType
 from app.models.people.payroll.salary_assignment import SalaryStructureAssignment
 from app.models.people.payroll.salary_component import (
     SalaryComponent,
@@ -54,6 +53,7 @@ from app.models.people.payroll.salary_structure import (
     SalaryStructureEarning,
 )
 from app.models.person import Person, PersonStatus
+from app.services.people.hr.employment_types import EmploymentTypeService
 from app.services.people.payroll.paye_calculator import PAYECalculator
 
 # Excel file path - works both locally and in Docker
@@ -84,17 +84,6 @@ def get_file_checksum(file_path: Path) -> str:
     return sha256_hash.hexdigest()
 
 
-def get_org_id(db: Session) -> UUID:
-    """Get the first organization ID."""
-    result = db.execute(
-        text("SELECT organization_id FROM core_org.organization LIMIT 1")
-    )
-    row = result.fetchone()
-    if not row:
-        raise ValueError("No organization found. Please seed organization first.")
-    return row[0]
-
-
 def get_admin_user_id(db: Session) -> UUID:
     """Get admin user ID for audit fields."""
     result = db.execute(
@@ -114,7 +103,12 @@ def get_admin_user_id(db: Session) -> UUID:
 
 
 def clear_payroll_data(db: Session, org_id: UUID):
-    """Clear all existing payroll data for the organization."""
+    """Clear existing payroll data inside the adapter-owned transaction.
+
+    The caller rebuilds the replacement payroll state before committing.  A
+    commit here would make a later creation failure irreversible and leave the
+    batch operation permanently incomplete.
+    """
     print("Clearing existing payroll data...")
 
     # Delete in order of dependencies
@@ -184,7 +178,6 @@ def clear_payroll_data(db: Session, org_id: UUID):
         {"org_id": org_id},
     )
 
-    db.commit()
     print("  Done.")
 
 
@@ -386,32 +379,6 @@ def get_or_create_designation(
     return desig
 
 
-def get_or_create_employment_type(
-    db: Session, org_id: UUID, type_name: str, user_id: UUID
-) -> EmploymentType:
-    """Get or create an employment type."""
-    emp_type = (
-        db.query(EmploymentType)
-        .filter(
-            EmploymentType.organization_id == org_id,
-            EmploymentType.type_name == type_name,
-        )
-        .first()
-    )
-
-    if not emp_type:
-        emp_type = EmploymentType(
-            organization_id=org_id,
-            type_code=type_name.upper().replace(" ", "_"),
-            type_name=type_name,
-            created_by_id=user_id,
-        )
-        db.add(emp_type)
-        db.flush()
-
-    return emp_type
-
-
 def excel_to_decimal(
     value: float | int | str | None, decimal_places: int = 2
 ) -> Decimal:
@@ -588,7 +555,7 @@ def find_or_create_employee(
     org_id: UUID,
     user_id: UUID,
     data: dict,
-    emp_type: EmploymentType,
+    employment_type_id: UUID,
     employee_code: str,
     batch_operation_id: UUID,
     match_only: bool = False,
@@ -688,7 +655,7 @@ def find_or_create_employee(
         date_of_joining=date(2024, 1, 1),  # Default
         department_id=dept.department_id,
         designation_id=desig.designation_id if desig else None,
-        employment_type_id=emp_type.employment_type_id,
+        employment_type_id=employment_type_id,
         created_by_id=user_id,
         batch_operation_id=batch_operation_id,  # Track which batch created this
     )
@@ -728,8 +695,149 @@ def seed_tax_bands(db: Session, org_id: UUID, user_id: UUID):
     print(f"  Created {len(bands)} tax bands.")
 
 
+def _run_seed(db: Session, *, org_id: UUID, args) -> None:
+    """Run one explicitly scoped seed after all People prerequisites exist."""
+    user_id = get_admin_user_id(db)
+    print(f"Organization ID: {org_id}")
+    print(f"Admin User ID: {user_id}")
+
+    # These are pre-existing People facts, not records this payroll script owns.
+    # Resolve all three before the first destructive payroll statement.
+    employment_types = EmploymentTypeService(db, org_id)
+    permanent_type = employment_types.require_active_by_code("PERMANENT")
+    contract_type = employment_types.require_active_by_code("CONTRACT")
+    nysc_type = employment_types.require_active_by_code("NYSC")
+    permanent_staff, contract_staff = parse_excel_data(EXCEL_PATH)
+
+    file_checksum = get_file_checksum(EXCEL_PATH)
+    batch = BatchOperation(
+        organization_id=org_id,
+        operation_type=BatchOperationType.SCRIPT,
+        operation_name="seed_payroll_from_excel",
+        description=f"Seeding payroll data from {EXCEL_PATH.name}",
+        source_file=str(EXCEL_PATH),
+        source_checksum=file_checksum,
+        started_by_id=user_id,
+        metadata_={"match_only": args.match_only, "dry_run": args.dry_run},
+    )
+    db.add(batch)
+    db.flush()
+    print(f"Batch Operation ID: {batch.id}")
+
+    if args.dry_run:
+        print("\n[DRY RUN - No changes will be committed]\n")
+    else:
+        clear_payroll_data(db, org_id)
+
+    components = create_components(db, org_id, user_id)
+    permanent_structure, contract_structure = create_structures(
+        db, org_id, user_id, components
+    )
+    seed_tax_bands(db, org_id, user_id)
+
+    print("\nProcessing employees...")
+    employee_counter = 1
+    stats = {"created": 0, "found": 0, "skipped": 0, "errors": []}
+
+    staff_groups = (
+        (
+            permanent_staff,
+            permanent_structure,
+            permanent_type.employment_type_id,
+        ),
+        (
+            contract_staff,
+            contract_structure,
+            contract_type.employment_type_id,
+        ),
+    )
+    for staff, structure, default_employment_type_id in staff_groups:
+        for data in staff:
+            employment_type_id = (
+                nysc_type.employment_type_id
+                if data["is_nysc"]
+                else default_employment_type_id
+            )
+            employee_code = f"EMP{employee_counter:04d}"
+            employee, status = find_or_create_employee(
+                db,
+                org_id,
+                user_id,
+                data,
+                employment_type_id,
+                employee_code,
+                batch.id,
+                match_only=args.match_only,
+            )
+
+            if status == "found":
+                print(f"  ✓ Found: {data['name']} (code: {employee.employee_code})")
+                stats["found"] += 1
+                create_assignment(
+                    db,
+                    org_id,
+                    user_id,
+                    employee,
+                    structure,
+                    data["monthly_gross"],
+                    batch.id,
+                )
+            elif status == "created":
+                print(f"  + Created: {data['name']} (code: {employee_code})")
+                stats["created"] += 1
+                batch.track_created("employee", employee.employee_id)
+                batch.track_created("person", employee.person_id)
+                create_assignment(
+                    db,
+                    org_id,
+                    user_id,
+                    employee,
+                    structure,
+                    data["monthly_gross"],
+                    batch.id,
+                )
+            else:
+                print(f"  ⚠ Skipped: {data['name']} (not found, match-only mode)")
+                stats["skipped"] += 1
+            employee_counter += 1
+
+    batch.mark_completed(
+        created=stats["created"],
+        updated=stats["found"],
+        skipped=stats["skipped"],
+        failed=len(stats["errors"]),
+    )
+
+    if args.dry_run:
+        print("\n[DRY RUN - Rolling back all changes]")
+        db.rollback()
+    else:
+        db.commit()
+
+    print("\n" + "=" * 60)
+    print("SUMMARY")
+    print("=" * 60)
+    print(f"  Employees found (matched):  {stats['found']}")
+    print(f"  Employees created (new):    {stats['created']}")
+    print(f"  Employees skipped:          {stats['skipped']}")
+    print(f"  Errors:                     {len(stats['errors'])}")
+    print(f"\n  Batch Operation ID: {batch.id}")
+    print("=" * 60)
+
+    if not args.dry_run:
+        print("\nSUCCESS: Payroll data seeded successfully!")
+        print("\nTo rollback this batch, run:")
+        print(
+            "  DELETE FROM payroll.salary_structure_assignment "
+            f"WHERE batch_operation_id = '{batch.id}';"
+        )
+        print(f"  DELETE FROM hr.employee WHERE batch_operation_id = '{batch.id}';")
+        print(f"  DELETE FROM public.people WHERE batch_operation_id = '{batch.id}';")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Seed payroll data from Excel")
+    parser.add_argument("--organization-id", type=UUID, required=True)
     parser.add_argument(
         "--match-only",
         action="store_true",
@@ -754,208 +862,16 @@ def main():
         print(f"ERROR: Excel file not found: {EXCEL_PATH}")
         sys.exit(1)
 
-    db = SessionLocal()
-
-    # Statistics
-    stats = {
-        "created": 0,
-        "found": 0,
-        "skipped": 0,
-        "errors": [],
-    }
-
-    try:
-        org_id = get_org_id(db)
-        user_id = get_admin_user_id(db)
-        print(f"Organization ID: {org_id}")
-        print(f"Admin User ID: {user_id}")
-
-        # Create batch operation record for audit trail
-        file_checksum = get_file_checksum(EXCEL_PATH)
-        batch = BatchOperation(
-            organization_id=org_id,
-            operation_type=BatchOperationType.SCRIPT,
-            operation_name="seed_payroll_from_excel",
-            description=f"Seeding payroll data from {EXCEL_PATH.name}",
-            source_file=str(EXCEL_PATH),
-            source_checksum=file_checksum,
-            started_by_id=user_id,
-            metadata_={"match_only": args.match_only, "dry_run": args.dry_run},
-        )
-        db.add(batch)
-        db.flush()
-        print(f"Batch Operation ID: {batch.id}")
-
-        if args.dry_run:
-            print("\n[DRY RUN - No changes will be committed]\n")
-
-        # Step 1: Clear existing data (skip in dry run)
-        if not args.dry_run:
-            clear_payroll_data(db, org_id)
-
-        # Step 2: Create components
-        components = create_components(db, org_id, user_id)
-
-        # Step 3: Create structures
-        perm_struct, contract_struct = create_structures(
-            db, org_id, user_id, components
-        )
-
-        # Step 4: Seed tax bands
-        seed_tax_bands(db, org_id, user_id)
-
-        # Step 5: Parse Excel data
-        permanent_staff, contract_staff = parse_excel_data(EXCEL_PATH)
-
-        # Step 6: Get/create employment types
-        perm_emp_type = get_or_create_employment_type(db, org_id, "Permanent", user_id)
-        contract_emp_type = get_or_create_employment_type(
-            db, org_id, "Contract", user_id
-        )
-        nysc_emp_type = get_or_create_employment_type(db, org_id, "NYSC", user_id)
-
-        # Step 7: Process employees and create assignments
-        print("\nProcessing employees...")
-        emp_counter = 1
-
-        for data in permanent_staff:
-            emp_type = nysc_emp_type if data["is_nysc"] else perm_emp_type
-            employee_code = f"EMP{emp_counter:04d}"
-
-            emp, status = find_or_create_employee(
-                db,
-                org_id,
-                user_id,
-                data,
-                emp_type,
-                employee_code,
-                batch.id,
-                match_only=args.match_only,
-            )
-
-            if status == "found":
-                print(f"  ✓ Found: {data['name']} (code: {emp.employee_code})")
-                stats["found"] += 1
-                create_assignment(
-                    db,
-                    org_id,
-                    user_id,
-                    emp,
-                    perm_struct,
-                    data["monthly_gross"],
-                    batch.id,
-                )
-            elif status == "created":
-                print(f"  + Created: {data['name']} (code: {employee_code})")
-                stats["created"] += 1
-                batch.track_created("employee", emp.employee_id)
-                batch.track_created("person", emp.person_id)
-                create_assignment(
-                    db,
-                    org_id,
-                    user_id,
-                    emp,
-                    perm_struct,
-                    data["monthly_gross"],
-                    batch.id,
-                )
-            else:
-                print(f"  ⚠ Skipped: {data['name']} (not found, match-only mode)")
-                stats["skipped"] += 1
-
-            emp_counter += 1
-
-        for data in contract_staff:
-            emp_type = nysc_emp_type if data["is_nysc"] else contract_emp_type
-            employee_code = f"EMP{emp_counter:04d}"
-
-            emp, status = find_or_create_employee(
-                db,
-                org_id,
-                user_id,
-                data,
-                emp_type,
-                employee_code,
-                batch.id,
-                match_only=args.match_only,
-            )
-
-            if status == "found":
-                print(f"  ✓ Found: {data['name']} (code: {emp.employee_code})")
-                stats["found"] += 1
-                create_assignment(
-                    db,
-                    org_id,
-                    user_id,
-                    emp,
-                    contract_struct,
-                    data["monthly_gross"],
-                    batch.id,
-                )
-            elif status == "created":
-                print(f"  + Created: {data['name']} (code: {employee_code})")
-                stats["created"] += 1
-                batch.track_created("employee", emp.employee_id)
-                batch.track_created("person", emp.person_id)
-                create_assignment(
-                    db,
-                    org_id,
-                    user_id,
-                    emp,
-                    contract_struct,
-                    data["monthly_gross"],
-                    batch.id,
-                )
-            else:
-                print(f"  ⚠ Skipped: {data['name']} (not found, match-only mode)")
-                stats["skipped"] += 1
-
-            emp_counter += 1
-
-        # Update batch operation with statistics
-        batch.mark_completed(
-            created=stats["created"],
-            updated=stats["found"],  # Found employees got new assignments
-            skipped=stats["skipped"],
-            failed=len(stats["errors"]),
-        )
-
-        if args.dry_run:
-            print("\n[DRY RUN - Rolling back all changes]")
+    with session_for_org(args.organization_id) as db:
+        try:
+            _run_seed(db, org_id=args.organization_id, args=args)
+        except Exception as exc:
             db.rollback()
-        else:
-            db.commit()
+            print(f"\nERROR: {exc}")
+            import traceback
 
-        print("\n" + "=" * 60)
-        print("SUMMARY")
-        print("=" * 60)
-        print(f"  Employees found (matched):  {stats['found']}")
-        print(f"  Employees created (new):    {stats['created']}")
-        print(f"  Employees skipped:          {stats['skipped']}")
-        print(f"  Errors:                     {len(stats['errors'])}")
-        print(f"\n  Batch Operation ID: {batch.id}")
-        print("=" * 60)
-
-        if not args.dry_run:
-            print("\nSUCCESS: Payroll data seeded successfully!")
-            print("\nTo rollback this batch, run:")
-            print(
-                f"  DELETE FROM payroll.salary_structure_assignment WHERE batch_operation_id = '{batch.id}';"
-            )
-            print(f"  DELETE FROM hr.employee WHERE batch_operation_id = '{batch.id}';")
-            print(
-                f"  DELETE FROM public.people WHERE batch_operation_id = '{batch.id}';"
-            )
-
-    except Exception as e:
-        db.rollback()
-        print(f"\nERROR: {e}")
-        import traceback
-
-        traceback.print_exc()
-        sys.exit(1)
-    finally:
-        db.close()
+            traceback.print_exc()
+            sys.exit(1)
 
 
 if __name__ == "__main__":

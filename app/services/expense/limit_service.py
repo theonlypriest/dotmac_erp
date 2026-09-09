@@ -715,7 +715,7 @@ class ExpenseLimitService(ExpenseServiceBase):
         - DEPARTMENT: Matches employee.department_id
         - GRADE: Matches employee.grade_id
         - DESIGNATION: Matches employee.designation_id
-        - EMPLOYMENT_TYPE: Matches employee.employment_type
+        - EMPLOYMENT_TYPE: Matches employee.employment_type_id
         - EMPLOYEE: Matches employee.employee_id
         """
         today = claim_date or date.today()
@@ -764,11 +764,16 @@ class ExpenseLimitService(ExpenseServiceBase):
                 )
             )
 
-        # Employment type rules
-        if hasattr(employee, "employment_type") and employee.employment_type:
-            # Employment type is stored as scope_id = hash or direct match
-            # For simplicity, we'll skip this for now
-            pass
+        # Employment Type is a People-owned fact, but the expense consequence
+        # is structurally scoped by the retained FK.  Omitting this branch
+        # makes a configured BLOCK rule disappear from live claim evaluation.
+        if employee.employment_type_id is not None:
+            scope_conditions.append(
+                and_(
+                    ExpenseLimitRule.scope_type == LimitScopeType.EMPLOYMENT_TYPE,
+                    ExpenseLimitRule.scope_id == employee.employment_type_id,
+                )
+            )
 
         # Query
         query = (

@@ -166,7 +166,8 @@ def test_refresh_cube_uses_concurrently_when_matview_is_populated():
 
     assert db.execute.call_count == 2
     refresh_sql = str(db.execute.call_args_list[1].args[0])
-    assert "CONCURRENTLY" in refresh_sql
+    assert "SELECT rpt.refresh_sales_analysis_mv" in refresh_sql
+    assert db.execute.call_args_list[1].args[1] == {"use_concurrently": True}
     assert cube.last_refreshed_at == now
 
 
@@ -189,8 +190,8 @@ def test_refresh_cube_skips_concurrently_when_matview_is_not_populated():
 
     assert db.execute.call_count == 2
     refresh_sql = str(db.execute.call_args_list[1].args[0])
-    assert "CONCURRENTLY" not in refresh_sql
-    assert "REFRESH MATERIALIZED VIEW" in refresh_sql
+    assert "SELECT rpt.refresh_sales_analysis_mv" in refresh_sql
+    assert db.execute.call_args_list[1].args[1] == {"use_concurrently": False}
     assert cube.last_refreshed_at == now
 
 
@@ -204,3 +205,10 @@ def test_refresh_cube_raises_when_matview_does_not_exist():
 
     with pytest.raises(RuntimeError, match="does not exist"):
         service.refresh_cube(cube)
+
+
+def test_refresh_cube_rejects_a_view_without_an_owner_bridge():
+    service = AnalysisCubeService(MagicMock())
+
+    with pytest.raises(RuntimeError, match="no approved refresh function"):
+        service.refresh_cube(_cube(source_view="rpt.unapproved_mv"))

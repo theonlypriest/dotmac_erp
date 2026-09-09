@@ -12,6 +12,7 @@ from app.services.dotmac_sub.client import (
     DotmacSubClient,
     DotmacSubConfig,
     DotmacSubError,
+    DotmacSubRateLimitError,
 )
 from app.services.finance.payments.paystack_client import PaystackConfig
 
@@ -177,6 +178,44 @@ async def test_selfcare_delivery_failure_returns_retryable_status():
     assert exc_info.value.status_code == 503
 
 
+@pytest.mark.asyncio
+async def test_selfcare_rate_limit_propagates_retry_after():
+    body = _body("DMAC-SELFCARE-RATE")
+    sub_client = MagicMock()
+    sub_client.relay_paystack_webhook.side_effect = DotmacSubRateLimitError(
+        "limited", status_code=429, retry_after=17
+    )
+
+    with (
+        patch(
+            "app.api.finance.payments.PaymentService.get_intent_by_reference",
+            return_value=None,
+        ),
+        patch("app.api.finance.payments.settings") as settings,
+        patch(
+            "app.api.finance.payments.get_paystack_config",
+            return_value=_paystack_config(),
+        ),
+        patch("app.api.finance.payments.prime_session"),
+        patch("app.api.finance.payments.set_payment_tenant_context"),
+        patch(
+            "app.services.dotmac_sub.DotmacSubConfig.for_org",
+            return_value=_sub_config(),
+        ),
+        patch("app.services.dotmac_sub.DotmacSubClient", return_value=sub_client),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        settings.default_organization_id = "89ed80a7-7f7e-4f27-8794-cf260d985542"
+        await paystack_webhook(
+            request=_request(body),
+            x_paystack_signature=_signature(body),
+            db=MagicMock(),
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.headers == {"Retry-After": "17"}
+
+
 def test_relay_client_preserves_body_and_signature():
     body = _body("DMAC-SELFCARE-4")
 
@@ -197,3 +236,27 @@ def test_relay_client_preserves_body_and_signature():
         raw_payload=body,
         signature=_signature(body),
     ) == {"status": "processed"}
+
+
+def test_relay_client_classifies_rate_limit_and_caps_retry_after():
+    body = _body("DMAC-SELFCARE-5")
+
+    client = DotmacSubClient(
+        DotmacSubConfig(api_url="https://selfcare.example", api_token="key")
+    )
+    client._client = httpx.Client(
+        base_url="https://selfcare.example/api/v1",
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                429, headers={"Retry-After": "3600"}, json={"detail": "limited"}
+            )
+        ),
+    )
+
+    with pytest.raises(DotmacSubRateLimitError) as exc_info:
+        client.relay_paystack_webhook(
+            raw_payload=body,
+            signature=_signature(body),
+        )
+
+    assert exc_info.value.retry_after == 60.0

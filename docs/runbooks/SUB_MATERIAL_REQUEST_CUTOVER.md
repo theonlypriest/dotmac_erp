@@ -12,7 +12,12 @@ After both applications are deployed but before enabling traffic:
 4. Capture the one-time service token and expose it to Sub as `ERP_SUB_SERVICE_TOKEN`.
 5. Re-run the Sub bootstrap with `--apply` to validate bindings and perform the first catalogue import.
 
-The ERP script creates a non-human API key with only `sub:inventory:read`, `sub:material:write`, and `sub:material:read`. It also configures the asynchronous signed status callback. No secret is committed to Git or stored in the service-hook row.
+The ERP script creates a non-human API key with `sub:inventory:read`,
+`sub:material:write`, `sub:material:read`, and `sub:domain:write`. The domain
+scope is required when Self-Care enables `/api/v1/sync/sub/bulk` for projects,
+tickets, project tasks, and work orders. It also configures the asynchronous
+signed status callback. No secret is committed to Git or stored in the
+service-hook row.
 
 ## Authority cutover
 

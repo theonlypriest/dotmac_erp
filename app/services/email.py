@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.models.domain_settings import SettingDomain
 from app.models.email_profile import EmailModule
+from app.services.domain_settings import AMBIENT, _Ambient
 from app.services.people.hr.invite_email import (
     default_employee_invite_email_template,
     render_employee_invite_email_template,
@@ -236,52 +237,73 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.lower() in {"1", "true", "yes", "on"}
 
 
-def _get_db_setting(db: Session | None, key: str) -> object | None:
+def _get_db_setting(
+    db: Session | None,
+    key: str,
+    *,
+    organization_id: "UUID | None | _Ambient" = AMBIENT,
+) -> object | None:
     """Get a setting value from the database."""
     if db is None:
         return None
     try:
         from app.services.settings_spec import resolve_value
 
-        return resolve_value(db, SettingDomain.email, key)
+        return resolve_value(
+            db, SettingDomain.email, key, organization_id=organization_id
+        )
     except (ImportError, AttributeError, KeyError) as exc:
         logger.debug("Could not resolve email setting %s: %s", key, exc)
         return None
 
 
-def _get_smtp_config(db: Session | None = None) -> SMTPConfig:
+def _get_smtp_config(
+    db: Session | None = None,
+    *,
+    organization_id: "UUID | None | _Ambient" = AMBIENT,
+) -> SMTPConfig:
     """Get SMTP config from database first, then fall back to environment variables."""
     # Try DB settings first, then env vars, then defaults
     host_raw = (
-        _get_db_setting(db, "smtp_host") or _env_value("SMTP_HOST") or "localhost"
+        _get_db_setting(db, "smtp_host", organization_id=organization_id)
+        or _env_value("SMTP_HOST")
+        or "localhost"
     )
     host = str(host_raw)
-    port = _get_db_setting(db, "smtp_port") or _env_int("SMTP_PORT", 587)
-    username_raw = _get_db_setting(db, "smtp_username") or _env_value("SMTP_USERNAME")
+    port = _get_db_setting(
+        db, "smtp_port", organization_id=organization_id
+    ) or _env_int("SMTP_PORT", 587)
+    username_raw = _get_db_setting(
+        db, "smtp_username", organization_id=organization_id
+    ) or _env_value("SMTP_USERNAME")
     username = str(username_raw) if username_raw is not None else None
-    password_raw = _get_db_setting(db, "smtp_password") or _env_value("SMTP_PASSWORD")
+    password_raw = _get_db_setting(
+        db, "smtp_password", organization_id=organization_id
+    ) or _env_value("SMTP_PASSWORD")
     password = str(password_raw) if password_raw is not None else None
 
     # Boolean settings
-    use_tls_db = _get_db_setting(db, "smtp_use_tls")
+    use_tls_db = _get_db_setting(db, "smtp_use_tls", organization_id=organization_id)
     use_tls = use_tls_db if use_tls_db is not None else _env_bool("SMTP_USE_TLS", True)
 
-    use_ssl_db = _get_db_setting(db, "smtp_use_ssl")
+    use_ssl_db = _get_db_setting(db, "smtp_use_ssl", organization_id=organization_id)
     use_ssl = use_ssl_db if use_ssl_db is not None else _env_bool("SMTP_USE_SSL", False)
 
     from_email_raw = (
-        _get_db_setting(db, "smtp_from_email")
+        _get_db_setting(db, "smtp_from_email", organization_id=organization_id)
         or _env_value("SMTP_FROM_EMAIL")
         or "noreply@example.com"
     )
     from_email = str(from_email_raw)
     from_name_raw = (
-        _get_db_setting(db, "smtp_from_name")
+        _get_db_setting(db, "smtp_from_name", organization_id=organization_id)
         or _env_value("SMTP_FROM_NAME")
         or "Dotmac ERP"
     )
     from_name = str(from_name_raw)
-    reply_to_raw = _get_db_setting(db, "email_reply_to") or _env_value("EMAIL_REPLY_TO")
+    reply_to_raw = _get_db_setting(
+        db, "email_reply_to", organization_id=organization_id
+    ) or _env_value("EMAIL_REPLY_TO")
     reply_to = str(reply_to_raw) if reply_to_raw is not None else None
 
     port_int = 587

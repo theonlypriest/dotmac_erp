@@ -12,6 +12,7 @@
         "value": stats.pending_count if stats.pending_count is not none else 0,
         "icon": "clock",
         "color": "amber",
+        "href": "/expense/claims/list?status=SUBMITTED",
         "subtitle": "%s waiting" | format(stats.pending_amount if stats.pending_amount is not none else currency_zero)
     },
     {
@@ -19,6 +20,7 @@
         "value": stats.approved_count if stats.approved_count is not none else 0,
         "icon": "check-circle",
         "color": "blue",
+        "href": "/expense/claims/list?status=APPROVED",
         "subtitle": "Ready for payment"
     },
     {
@@ -26,6 +28,7 @@
         "value": stats.rejected_count if stats.rejected_count is not none else 0,
         "icon": "x-circle",
         "color": "rose",
+        "href": "/expense/claims/list?status=REJECTED",
         "subtitle": "%s rejection rate" | format(stats.rejection_rate if stats.rejection_rate is not none else 0)
     },
     {
@@ -33,6 +36,7 @@
         "value": stats.paid_count if stats.paid_count is not none else 0,
         "icon": "currency",
         "color": "emerald",
+        "href": "/expense/claims/list?status=PAID",
         "subtitle": "%s reimbursed" | format(stats.paid_amount if stats.paid_amount is not none else currency_zero)
     }
 ] %}
@@ -43,67 +47,6 @@
     {% include "expense/_hero_stats.html" %}
 
     <div class="divider-expense"></div>
-
-    <div class="grid gap-6 lg:grid-cols-3">
-        <div class="card p-6">
-            <div class="mb-4">
-                <h3 class="text-base font-semibold text-slate-900 dark:text-white font-display">Claims Action Queue</h3>
-                <p class="text-sm text-slate-500 dark:text-slate-400">Prioritize the claims that are blocking workflow.</p>
-            </div>
-            <div class="space-y-3">
-                <a href="/expense/claims/list?status=SUBMITTED" class="flex items-center justify-between rounded-xl border border-amber-200 bg-amber-50/80 px-4 py-3 transition hover:border-amber-300 dark:border-amber-900/40 dark:bg-amber-900/10">
-                    <div>
-                        <p class="text-sm font-medium text-slate-900 dark:text-white">Pending Review</p>
-                        <p class="text-xs text-slate-500 dark:text-slate-400">Claims waiting for approval</p>
-                    </div>
-                    <span class="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">{{ stats.pending_count if stats.pending_count is not none else 0 }}</span>
-                </a>
-                <a href="/expense/claims/list?status=APPROVED" class="flex items-center justify-between rounded-xl border border-blue-200 bg-blue-50/80 px-4 py-3 transition hover:border-blue-300 dark:border-blue-900/40 dark:bg-blue-900/10">
-                    <div>
-                        <p class="text-sm font-medium text-slate-900 dark:text-white">Approved for Payment</p>
-                        <p class="text-xs text-slate-500 dark:text-slate-400">Claims ready for finance payout</p>
-                    </div>
-                    <span class="rounded-full bg-blue-100 px-2.5 py-1 text-xs font-semibold text-blue-700 dark:bg-blue-900/30 dark:text-blue-300">{{ stats.approved_count if stats.approved_count is not none else 0 }}</span>
-                </a>
-                <a href="/expense/claims/list?status=REJECTED" class="flex items-center justify-between rounded-xl border border-rose-200 bg-rose-50/80 px-4 py-3 transition hover:border-rose-300 dark:border-rose-900/40 dark:bg-rose-900/10">
-                    <div>
-                        <p class="text-sm font-medium text-slate-900 dark:text-white">Rejected Claims</p>
-                        <p class="text-xs text-slate-500 dark:text-slate-400">Claims needing correction</p>
-                    </div>
-                    <span class="rounded-full bg-rose-100 px-2.5 py-1 text-xs font-semibold text-rose-700 dark:bg-rose-900/30 dark:text-rose-300">{{ stats.rejected_count if stats.rejected_count is not none else 0 }}</span>
-                </a>
-            </div>
-        </div>
-
-        <div class="card p-6 lg:col-span-2">
-            <div class="mb-6">
-                <h3 class="text-base font-semibold text-slate-900 dark:text-white font-display">Action Required</h3>
-                <p class="text-sm text-slate-500 dark:text-slate-400">The next steps to move claims through reimbursement.</p>
-            </div>
-            <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                <a href="/expense/claims/list?status=SUBMITTED" class="rounded-xl border border-amber-200 bg-amber-50/80 p-4 transition hover:border-amber-300 dark:border-amber-900/40 dark:bg-amber-900/10">
-                    <p class="text-xs uppercase tracking-wide text-amber-700 dark:text-amber-300">Pending Review</p>
-                    <p class="mt-2 text-2xl font-semibold text-slate-900 dark:text-white">{{ stats.pending_count if stats.pending_count is not none else 0 }}</p>
-                    <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">{{ stats.pending_amount if stats.pending_amount is not none else currency_zero }} waiting</p>
-                </a>
-                <a href="/expense/claims/list?status=APPROVED" class="rounded-xl border border-blue-200 bg-blue-50/80 p-4 transition hover:border-blue-300 dark:border-blue-900/40 dark:bg-blue-900/10">
-                    <p class="text-xs uppercase tracking-wide text-blue-700 dark:text-blue-300">Approved Queue</p>
-                    <p class="mt-2 text-2xl font-semibold text-slate-900 dark:text-white">{{ stats.approved_count if stats.approved_count is not none else 0 }}</p>
-                    <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Ready for reimbursement</p>
-                </a>
-                <a href="/expense/claims/list?status=REJECTED" class="rounded-xl border border-rose-200 bg-rose-50/80 p-4 transition hover:border-rose-300 dark:border-rose-900/40 dark:bg-rose-900/10">
-                    <p class="text-xs uppercase tracking-wide text-rose-700 dark:text-rose-300">Rejected Claims</p>
-                    <p class="mt-2 text-2xl font-semibold text-slate-900 dark:text-white">{{ stats.rejected_count if stats.rejected_count is not none else 0 }}</p>
-                    <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">{{ stats.rejection_rate if stats.rejection_rate is not none else 0 }}% rejection rate</p>
-                </a>
-                <a href="/expense/claims/list?status=PAID" class="rounded-xl border border-emerald-200 bg-emerald-50/80 p-4 transition hover:border-emerald-300 dark:border-emerald-900/40 dark:bg-emerald-900/10">
-                    <p class="text-xs uppercase tracking-wide text-emerald-700 dark:text-emerald-300">Reimbursed Claims</p>
-                    <p class="mt-2 text-2xl font-semibold text-slate-900 dark:text-white">{{ stats.paid_count if stats.paid_count is not none else 0 }}</p>
-                    <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">{{ stats.paid_amount if stats.paid_amount is not none else currency_zero }} reimbursed</p>
-                </a>
-            </div>
-        </div>
-    </div>
 
     <div class="grid gap-6 lg:grid-cols-2">
         <div class="card p-6">
@@ -151,6 +94,11 @@
                     <span class="cmd-action-key">P</span>
                     <span class="cmd-action-label">Prepare Reimbursements</span>
                     <span class="cmd-action-hint">{{ stats.approved_count if stats.approved_count is not none else 0 }}</span>
+                </a>
+                <a href="/expense/claims/list?status=REJECTED" class="cmd-action">
+                    <span class="cmd-action-key">X</span>
+                    <span class="cmd-action-label">Review Rejected Claims</span>
+                    <span class="cmd-action-hint">{{ stats.rejected_count if stats.rejected_count is not none else 0 }}</span>
                 </a>
                 <a href="/expense/claims/list?status=PAID" class="cmd-action">
                     <span class="cmd-action-key">H</span>

@@ -388,6 +388,13 @@ class LeaveService:
             employee.updated_at = datetime.now(UTC)
             employee.updated_by_id = self.ctx.person_id if self.ctx else None
             self.db.flush()
+            from app.services.people.hr.staff_access_projection import (
+                StaffAccessProjectionService,
+            )
+
+            StaffAccessProjectionService(self.db).project_employee_account_status(
+                employee
+            )
             return EmployeeStatus.ON_LEAVE.value
 
         if not has_active_leave and employee.status == EmployeeStatus.ON_LEAVE:
@@ -395,6 +402,13 @@ class LeaveService:
             employee.updated_at = datetime.now(UTC)
             employee.updated_by_id = self.ctx.person_id if self.ctx else None
             self.db.flush()
+            from app.services.people.hr.staff_access_projection import (
+                StaffAccessProjectionService,
+            )
+
+            StaffAccessProjectionService(self.db).project_employee_account_status(
+                employee
+            )
             return EmployeeStatus.ACTIVE.value
 
         return None
@@ -430,6 +444,7 @@ class LeaveService:
 
         set_on_leave = 0
         set_active = 0
+        changed_employees: list[Employee] = []
         for employee in candidates:
             should_be_on_leave = employee.employee_id in approved_on_date
             if should_be_on_leave and employee.status == EmployeeStatus.ACTIVE:
@@ -437,14 +452,21 @@ class LeaveService:
                 employee.updated_at = datetime.now(UTC)
                 employee.updated_by_id = self.ctx.person_id if self.ctx else None
                 set_on_leave += 1
+                changed_employees.append(employee)
             elif not should_be_on_leave and employee.status == EmployeeStatus.ON_LEAVE:
                 employee.status = EmployeeStatus.ACTIVE
                 employee.updated_at = datetime.now(UTC)
                 employee.updated_by_id = self.ctx.person_id if self.ctx else None
                 set_active += 1
+                changed_employees.append(employee)
 
         if set_on_leave or set_active:
             self.db.flush()
+            from app.services.people.hr.staff_access_projection import (
+                refresh_staff_access_projections_for_employees,
+            )
+
+            refresh_staff_access_projections_for_employees(self.db, changed_employees)
 
         return {
             "set_on_leave": set_on_leave,
@@ -531,6 +553,22 @@ class LeaveService:
                 action_url=action_url,
                 actor_id=actor_id,
             )
+
+    def _project_leave_access_restriction(
+        self,
+        application: LeaveApplication,
+        *,
+        reason: str | None = None,
+    ) -> None:
+        """Refresh the ERP-owned leave access projection for this application."""
+        from app.services.people.hr.staff_access_projection import (
+            StaffAccessProjectionService,
+        )
+
+        StaffAccessProjectionService(self.db).project_leave_application(
+            application,
+            reason=reason,
+        )
 
     # =========================================================================
     # Leave Types
@@ -1528,6 +1566,7 @@ class LeaveService:
             )
 
         self.db.flush()
+        self._project_leave_access_restriction(application)
 
         fire_audit_event(
             db=self.db,
@@ -1603,6 +1642,7 @@ class LeaveService:
         application.rejection_reason = reason
 
         self.db.flush()
+        self._project_leave_access_restriction(application, reason=reason)
 
         fire_audit_event(
             db=self.db,
@@ -1700,6 +1740,7 @@ class LeaveService:
             )
 
         self.db.flush()
+        self._project_leave_access_restriction(application, reason=reason)
 
         fire_audit_event(
             db=self.db,
@@ -1873,7 +1914,7 @@ class LeaveService:
 
         Returns a list of employees with their leave balances across all leave types.
         """
-        from app.models.people.hr import Department, Employee
+        from app.models.people.hr import Department, Employee, EmployeeStatus
         from app.models.person import Person
 
         target_year = year or date.today().year
@@ -1906,6 +1947,12 @@ class LeaveService:
             .where(
                 Employee.organization_id == org_id,
                 Person.organization_id == org_id,
+                Employee.status.in_(
+                    [
+                        EmployeeStatus.ACTIVE,
+                        EmployeeStatus.ON_LEAVE,
+                    ]
+                ),
                 func.extract("year", LeaveAllocation.from_date) == target_year,
             )
         )

@@ -14,6 +14,7 @@ from app.services.dotmac_sub.client import (
     DotmacSubConfig,
     DotmacSubError,
     DotmacSubNotFoundError,
+    DotmacSubPermanentSyncError,
     DotmacSubRateLimitError,
 )
 from app.services.dotmac_sub.sync import (
@@ -30,6 +31,7 @@ __all__ = [
     "DotmacSubConfig",
     "DotmacSubError",
     "DotmacSubNotFoundError",
+    "DotmacSubPermanentSyncError",
     "DotmacSubRateLimitError",
     "DotmacSubSyncService",
     "FullSyncResult",

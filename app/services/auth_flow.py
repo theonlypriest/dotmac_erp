@@ -6,6 +6,7 @@ import os
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
+from uuid import UUID
 
 try:
     from datetime import UTC  # type: ignore
@@ -89,6 +90,13 @@ def _truncate_user_agent(value: str | None, max_len: int = 512) -> str | None:
     return value[:max_len]
 
 
+def _settings_organization_id(db: Session) -> UUID | None:
+    org_id = db.info.get("organization_id")
+    if org_id is None:
+        return None
+    return cast(UUID, coerce_uuid(org_id))
+
+
 def _setting_value(db: Session | None, key: str) -> str | None:
     """Read an auth setting through the resolver, as a string.
 
@@ -98,13 +106,10 @@ def _setting_value(db: Session | None, key: str) -> str | None:
     organization scope, the spec's coercion and constraint checks, and the
     degrade-to-default rule, all of which were reimplemented per caller here.
 
-    Scope stays ambient deliberately. Auth settings are WRITTEN with the
-    session's organization attached (`DomainSettings.upsert_by_key` sets
-    `scope = ORG_SPECIFIC`), so reading them as global-only would miss every
-    setting configured through the admin UI. This code has no organization of
-    its own to state — it runs on login, before one is established — so the
-    session's context is the honest answer, and it is strictly better than the
-    unscoped query it replaces.
+    Current scope behavior: use the session organization when it has been
+    primed; otherwise read the global setting explicitly. This avoids an
+    ambient resolver fallback while preserving login-time reads that genuinely
+    do not yet know an organization.
 
     Returns a string so every caller's existing coercion keeps working
     unchanged: `str(True)` lowercases to "true" for the boolean readers, and
@@ -112,7 +117,12 @@ def _setting_value(db: Session | None, key: str) -> str | None:
     """
     if db is None:
         return None
-    value = resolve_value(db, SettingDomain.auth, key)
+    value = resolve_value(
+        db,
+        SettingDomain.auth,
+        key,
+        organization_id=_settings_organization_id(db),
+    )
     if value is None:
         return None
     return str(value)
@@ -324,7 +334,12 @@ def _password_reset_ttl_minutes(db: Session | None) -> int:
     return 60
 
 
-def _issue_password_reset_token(db: Session | None, person_id: str, email: str) -> str:
+def _issue_password_reset_token(
+    db: Session | None,
+    person_id: str,
+    email: str,
+    organization_id: UUID | None = None,
+) -> str:
     now = _now()
     payload = {
         "sub": person_id,
@@ -335,11 +350,31 @@ def _issue_password_reset_token(db: Session | None, person_id: str, email: str) 
             (now + timedelta(minutes=_password_reset_ttl_minutes(db))).timestamp()
         ),
     }
+    if organization_id is not None:
+        payload["organization_id"] = str(organization_id)
     return cast(str, jwt.encode(payload, _jwt_secret(db), algorithm=_jwt_algorithm(db)))
 
 
 def _decode_password_reset_token(db: Session | None, token: str) -> dict[str, Any]:
     return _decode_jwt(db, token, "password_reset")
+
+
+def password_reset_organization_hint(token: str) -> UUID | None:
+    """Return the untrusted tenant hint carried by a reset token.
+
+    The hint is used only to choose the tenant-scoped session in which the
+    token is subsequently signature-verified.  It never authorizes a reset.
+    Tokens issued before the tenant claim was added return ``None`` and are
+    handled by the compatibility fan-out in the API service.
+    """
+    try:
+        payload = jwt.get_unverified_claims(token)
+        if payload.get("typ") != "password_reset":
+            return None
+        raw_org_id = payload.get("organization_id")
+        return coerce_uuid(raw_org_id, raise_http=False) if raw_org_id else None
+    except (JWTError, TypeError, ValueError):
+        return None
 
 
 def _decode_jwt(db: Session | None, token: str, expected_type: str) -> dict[str, Any]:
@@ -1185,7 +1220,12 @@ def request_password_reset(db: Session, email: str) -> dict | None:
     if not credential:
         return None
 
-    token = _issue_password_reset_token(db, str(person.id), email)
+    token = _issue_password_reset_token(
+        db,
+        str(person.id),
+        email,
+        person.organization_id,
+    )
     return {
         "token": token,
         "email": email,

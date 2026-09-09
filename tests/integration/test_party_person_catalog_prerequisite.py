@@ -64,12 +64,19 @@ def test_migrated_erp_satisfies_the_kernel_party_contract(engine: Engine) -> Non
     ("statement", "expected"),
     [
         pytest.param(
-            "DROP TABLE public.party_persons",
+            # People now consumes this provider through a real FK. CASCADE is
+            # confined to the rolled-back sensitivity transaction and lets the
+            # verifier observe the intended missing-table defect instead of
+            # PostgreSQL refusing the fixture setup first.
+            "DROP TABLE public.party_persons CASCADE",
             "does not exist",
             id="person-subtype-absent",
         ),
         pytest.param(
-            "ALTER TABLE public.parties DROP CONSTRAINT uq_parties_tenant_id",
+            # The People composite FK depends on the provider's backing unique
+            # index. Drop both within the rolled-back probe so this canary keeps
+            # testing the provider contract rather than dependency DDL.
+            "ALTER TABLE public.parties DROP CONSTRAINT uq_parties_tenant_id CASCADE",
             "unique",
             id="composite-identity-dropped",
         ),

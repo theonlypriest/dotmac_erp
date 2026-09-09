@@ -35,6 +35,7 @@ from app.services.finance.payments import (
     WebhookService,
 )
 from app.services.expense.limit_service import ExpenseLimitServiceError
+from app.services.finance.payments.payment_service import TransferOutcomeUnknown
 from app.services.finance.platform.authorization import AuthorizationService
 from app.services.settings_spec import resolve_value
 
@@ -408,7 +409,12 @@ def get_paystack_config(db: Session, organization_id: UUID) -> PaystackConfig:
     Raises HTTPException if Paystack is not enabled or configured.
     """
     # Check if enabled
-    enabled = resolve_value(db, SettingDomain.payments, "paystack_enabled")
+    enabled = resolve_value(
+        db,
+        SettingDomain.payments,
+        "paystack_enabled",
+        organization_id=organization_id,
+    )
     if not enabled:
         raise HTTPException(
             status_code=400,
@@ -416,8 +422,18 @@ def get_paystack_config(db: Session, organization_id: UUID) -> PaystackConfig:
         )
 
     # Get keys
-    secret_key = resolve_value(db, SettingDomain.payments, "paystack_secret_key")
-    public_key = resolve_value(db, SettingDomain.payments, "paystack_public_key")
+    secret_key = resolve_value(
+        db,
+        SettingDomain.payments,
+        "paystack_secret_key",
+        organization_id=organization_id,
+    )
+    public_key = resolve_value(
+        db,
+        SettingDomain.payments,
+        "paystack_public_key",
+        organization_id=organization_id,
+    )
 
     if not secret_key:
         raise HTTPException(
@@ -470,7 +486,10 @@ def initialize_invoice_payment(
     # Build callback URL
     # Check for configured base URL first, then fall back to request base
     callback_base = resolve_value(
-        db, SettingDomain.payments, "paystack_callback_base_url"
+        db,
+        SettingDomain.payments,
+        "paystack_callback_base_url",
+        organization_id=organization_id,
     )
     if callback_base:
         base_url = str(callback_base).rstrip("/")
@@ -702,7 +721,10 @@ def initialize_expense_payment(
 
     # Check if transfers are enabled
     transfers_enabled = resolve_value(
-        db, SettingDomain.payments, "paystack_transfers_enabled"
+        db,
+        SettingDomain.payments,
+        "paystack_transfers_enabled",
+        organization_id=organization_id,
     )
     if not transfers_enabled:
         raise HTTPException(
@@ -808,7 +830,10 @@ def initiate_transfer(
 
     # Check if transfers are enabled
     transfers_enabled = resolve_value(
-        db, SettingDomain.payments, "paystack_transfers_enabled"
+        db,
+        SettingDomain.payments,
+        "paystack_transfers_enabled",
+        organization_id=organization_id,
     )
     if not transfers_enabled:
         raise HTTPException(
@@ -844,6 +869,46 @@ def initiate_transfer(
         raise HTTPException(status_code=400, detail=str(e))
     except ExpenseLimitServiceError as e:
         raise HTTPException(status_code=403, detail=str(e))
+    except TransferOutcomeUnknown as e:
+        # 409, not 502, and the distinction is the whole point.
+        #
+        # A 502 says "the upstream failed" and every retry policy in the world
+        # -- proxies, HTTP client libraries, the operator's instinct, a queue's
+        # backoff -- treats 5xx as safe to repeat. Repeating THIS request is how
+        # an employee gets reimbursed twice, because the first attempt may
+        # already have moved the money and nobody can currently say.
+        #
+        # 409 says the resource is in a state that conflicts with what was
+        # asked, which is exactly true: the intent is INDETERMINATE and no
+        # further initiation is permitted from it. 4xx is not in any default
+        # retry set, it does not read as "we failed", and it puts the caller on
+        # the only correct path -- wait for reconciliation, or have a human
+        # confirm with Paystack.
+        #
+        # 202 was the alternative and was rejected: it is a SUCCESS code, and a
+        # client that treats "accepted" as "it worked" would mark the claim as
+        # paid in its own UI on the strength of an outcome nobody observed.
+        logger.error(
+            "Transfer initiation outcome UNKNOWN for intent %s: %s",
+            e.intent_id,
+            e.reason,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "transfer_outcome_unknown",
+                "intent_id": str(e.intent_id),
+                "message": (
+                    "The transfer was sent to Paystack but its outcome could "
+                    "not be confirmed, so it may or may not have moved money. "
+                    "Do NOT retry this payout. It has been recorded as "
+                    "unresolved and is being reconciled; the expense claim "
+                    "stays approved and unpaid until a real outcome is known."
+                ),
+                "retryable": False,
+                "reason": e.reason,
+            },
+        )
     except PaystackError as e:
         logger.error(f"Transfer initiation failed: {e}")
         raise HTTPException(status_code=502, detail=f"Transfer failed: {e.message}")
@@ -947,7 +1012,11 @@ async def paystack_webhook(
         # Selfcare references are not ERP payment intents. Verify the provider
         # signature before forwarding only the reference; Selfcare performs its
         # own gateway verification before deciding any financial consequence.
-        from app.services.dotmac_sub import DotmacSubClient, DotmacSubConfig
+        from app.services.dotmac_sub import (
+            DotmacSubClient,
+            DotmacSubConfig,
+            DotmacSubRateLimitError,
+        )
         from app.services.finance.payments.paystack_client import PaystackClient
 
         try:
@@ -973,12 +1042,41 @@ async def paystack_webhook(
                 raw_payload=raw_body,
                 signature=x_paystack_signature,
             )
+            logger.info(
+                "Relayed verified Paystack webhook to dotmac_sub",
+                extra={
+                    "event_type": event_type,
+                    "payment_reference": reference,
+                    "relay_outcome": "forwarded",
+                },
+            )
             return WebhookResponse(status="forwarded")
+        except DotmacSubRateLimitError as exc:
+            retry_after = int(exc.retry_after or 1)
+            logger.warning(
+                "dotmac_sub rate-limited verified Paystack webhook relay",
+                extra={
+                    "event_type": event_type,
+                    "payment_reference": reference,
+                    "relay_outcome": "rate_limited",
+                    "retry_after_seconds": retry_after,
+                },
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Payment notification delivery is temporarily unavailable",
+                headers={"Retry-After": str(retry_after)},
+            )
         except HTTPException:
             raise
         except Exception:
             logger.exception(
-                "Failed to forward verified Paystack reference to dotmac_sub"
+                "Failed to forward verified Paystack reference to dotmac_sub",
+                extra={
+                    "event_type": event_type,
+                    "payment_reference": reference,
+                    "relay_outcome": "failed",
+                },
             )
             # A non-2xx response asks Paystack to retry delivery.
             raise HTTPException(

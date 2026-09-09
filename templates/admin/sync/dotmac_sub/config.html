@@ -1,13 +1,15 @@
 {% extends "admin/base_admin.html" %}
 {% from "components/macros.html" import icon_svg %}
 
-{% block page_title %}dotmac_sub Configuration{% endblock %}
-{% block page_subtitle %}Configure the dotmac_sub API connection{% endblock %}
+{% block page_title %}Dotmac Sub Configuration{% endblock %}
+{% block page_subtitle %}Configure the Dotmac Sub service connection{% endblock %}
 
 {% block content %}
 <div class="space-y-6">
     <nav class="flex items-center gap-2 text-sm" aria-label="Breadcrumb">
-        <a href="/admin/sync/dotmac-sub" class="text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200">dotmac_sub Sync</a>
+        <a href="/admin/settings/integrations" class="text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200">Integrations</a>
+        {{ icon_svg("chevron-right", "h-4 w-4 text-slate-400") }}
+        <a href="/admin/sync/dotmac-sub" class="text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200">Dotmac Sub Sync</a>
         {{ icon_svg("chevron-right", "h-4 w-4 text-slate-400") }}
         <span class="text-slate-900 dark:text-white font-medium" aria-current="page">Configuration</span>
     </nav>
@@ -32,33 +34,29 @@
                 <input type="url" id="base_url" name="base_url" class="form-input" required
                        placeholder="https://selfcare.dotmac.io"
                        value="{{ config.base_url if config and config.base_url else 'https://selfcare.dotmac.io' }}">
-                <span class="form-hint">The dotmac_sub host (no trailing /api/v1).</span>
+                <span class="form-hint">The Dotmac Sub host, without a trailing <span class="font-mono">/api/v1</span>.</span>
             </div>
 
             <div>
-                <label class="form-label" for="username">Staff Username {% if not has_token %}<span class="text-rose-500">*</span>{% endif %}</label>
-                <input type="text" id="username" name="username" class="form-input" autocomplete="off"
-                       placeholder="e.g. admin"
-                       value="{{ config.company if config and config.company else '' }}">
-                <span class="form-hint">dotmac_sub staff account used for the sync (session login).</span>
+                <label class="form-label" for="api_token">Scoped Service API Key {% if not has_token %}<span class="text-rose-500">*</span>{% endif %}</label>
+                <input type="password" id="api_token" name="api_token" class="form-input" autocomplete="new-password"
+                       placeholder="{{ '•••••••• (leave blank to keep current)' if has_token else 'Dotmac Sub service API key' }}">
+                <span class="form-hint">Sent as <span class="font-mono">X-Api-Key</span>. Staff usernames and passwords are not accepted.</span>
             </div>
 
             <div>
-                <label class="form-label" for="password">Staff Password {% if not has_token %}<span class="text-rose-500">*</span>{% endif %}</label>
-                <input type="password" id="password" name="password" class="form-input" autocomplete="new-password"
-                       placeholder="{{ '•••••••• (leave blank to keep current)' if has_token else 'Account password' }}">
-                <span class="form-hint">Entered once, stored encrypted. The sync logs in and refreshes a short-lived JWT automatically — no token to manage.</span>
-            </div>
-
-            <div>
-                <label class="form-label" for="webhook_secret">Webhook Secret</label>
+                <label class="form-label" for="webhook_secret">Domain-event Webhook Secret</label>
                 <input type="password" id="webhook_secret" name="webhook_secret" class="form-input" autocomplete="new-password"
                        placeholder="Shared HMAC-SHA256 secret (optional)">
-                <span class="form-hint">Used to verify inbound webhooks at <span class="font-mono">/dotmac-sub/webhook</span>.</span>
+                <span class="form-hint">Verifies Dotmac Sub → ERP events at <span class="font-mono">/api/v1/dotmac-sub/webhook</span>. This is separate from Paystack.</span>
+            </div>
+
+            <div class="rounded-lg border border-sky-200 bg-sky-50 p-4 text-sm text-sky-900 dark:border-sky-800 dark:bg-sky-900/20 dark:text-sky-200">
+                Paystack sends its signed payment webhook to ERP. ERP verifies it and relays eligible <span class="font-mono">DMAC-*</span> charges to <span class="font-mono">/api/v1/payment-events/paystack</span> on this host. Configure the provider-facing URL on the Paystack page only.
             </div>
 
             <div class="flex justify-end gap-3">
-                <a href="/admin/sync/dotmac-sub" class="btn btn-secondary">Cancel</a>
+                <a href="/admin/settings/integrations" class="btn btn-secondary">Cancel</a>
                 <button type="submit" class="btn btn-primary">Save Configuration</button>
             </div>
         </form>

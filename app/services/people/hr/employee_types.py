@@ -143,6 +143,7 @@ class EmployeeFilters:
     """Filters for listing employees."""
 
     status: Union[EmploymentStatus, str] | None = None
+    statuses: list[EmploymentStatus] | None = None
     is_active: bool | None = None
     department_id: uuid.UUID | None = None
     designation_id: uuid.UUID | None = None

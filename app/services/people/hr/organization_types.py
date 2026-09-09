@@ -182,6 +182,7 @@ class EmploymentTypeUpdateData:
     type_code: str | None = None
     type_name: str | None = None
     description: str | None = None
+    description_is_set: bool = False
     is_active: bool | None = None
 
 

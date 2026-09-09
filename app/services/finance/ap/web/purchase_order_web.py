@@ -23,6 +23,11 @@ from app.models.finance.common.attachment import AttachmentCategory
 from app.models.finance.gl.account_category import IFRSCategory
 from app.services.common import coerce_uuid
 from app.services.finance.ap.purchase_order import purchase_order_service
+from app.services.finance.ap.purchase_order_amounts import (
+    amounts_for,
+    amounts_for_many,
+    received_expr,
+)
 from app.services.finance.ap.supplier import supplier_service
 from app.services.finance.ap.web.base import (
     format_currency,
@@ -143,9 +148,7 @@ class PurchaseOrderWebService:
         open_total = db.scalar(
             select(
                 func.coalesce(
-                    func.sum(
-                        PurchaseOrder.total_amount - PurchaseOrder.amount_received
-                    ),
+                    func.sum(PurchaseOrder.total_amount - received_expr()),
                     0,
                 )
             ).where(
@@ -156,8 +159,12 @@ class PurchaseOrderWebService:
             )
         ) or Decimal("0")
 
+        # One batched derivation for the page, not one query per row.
+        page_amounts = amounts_for_many(db, org_id, [po.po_id for po, _ in orders])
+
         orders_view = []
         for po, supplier in orders:
+            amounts = page_amounts[po.po_id]
             orders_view.append(
                 {
                     "po_id": po.po_id,
@@ -167,7 +174,7 @@ class PurchaseOrderWebService:
                     "expected_delivery_date": format_date(po.expected_delivery_date),
                     "total_amount": format_currency(po.total_amount, po.currency_code),
                     "amount_received": format_currency(
-                        po.amount_received, po.currency_code
+                        amounts.amount_received, po.currency_code
                     ),
                     "status": po.status.value,
                     "currency_code": po.currency_code,
@@ -252,6 +259,7 @@ class PurchaseOrderWebService:
                 }
             )
 
+        po_amounts = amounts_for(db, org_id, po.po_id)
         order_view = {
             "po_id": po.po_id,
             "po_number": po.po_number,
@@ -263,8 +271,12 @@ class PurchaseOrderWebService:
             "subtotal": format_currency(po.subtotal, po.currency_code),
             "tax_amount": format_currency(po.tax_amount, po.currency_code),
             "total_amount": format_currency(po.total_amount, po.currency_code),
-            "amount_received": format_currency(po.amount_received, po.currency_code),
-            "amount_invoiced": format_currency(po.amount_invoiced, po.currency_code),
+            "amount_received": format_currency(
+                po_amounts.amount_received, po.currency_code
+            ),
+            "amount_invoiced": format_currency(
+                po_amounts.amount_invoiced, po.currency_code
+            ),
             "status": po.status.value,
             "terms_and_conditions": po.terms_and_conditions,
             "shipping_address": po.shipping_address,

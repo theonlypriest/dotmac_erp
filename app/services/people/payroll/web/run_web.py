@@ -9,6 +9,7 @@ from calendar import monthrange
 from datetime import date, timedelta
 from typing import Literal
 from urllib.parse import quote
+from uuid import UUID
 
 from fastapi import Request
 from fastapi.responses import (
@@ -26,14 +27,16 @@ from app.models.finance.gl.account import Account
 from app.models.people.hr.department import Department
 from app.models.people.hr.designation import Designation
 from app.models.people.hr.employee import Employee
-from app.models.people.hr.employment_type import EmploymentType
 from app.models.people.payroll.payroll_entry import PayrollEntry, PayrollEntryStatus
 from app.models.people.payroll.salary_assignment import SalaryStructureAssignment
 from app.models.people.payroll.salary_slip import SalarySlip, SalarySlipStatus
 from app.models.people.payroll.salary_structure import PayrollFrequency, SalaryStructure
 from app.services.common import PaginationParams, coerce_uuid, paginate
 from app.services.finance.platform.org_context import org_context_service
-from app.services.people.hr import EmploymentTypeFilters, OrganizationService
+from app.services.people.hr.employment_types import (
+    EmploymentTypeService,
+    EmploymentTypeView,
+)
 from app.services.people.payroll.eligibility import payroll_employee_eligibility_clause
 from app.services.people.payroll.payroll_service import (
     PayrollService,
@@ -165,41 +168,10 @@ class RunWebService:
     @staticmethod
     def _list_employment_types_for_filter(
         db: Session,
-        org_id,
-    ) -> list[EmploymentType]:
-        """Load employment types for payroll filters with safe fallbacks."""
-        # Use the same source path as HR employee forms.
-        try:
-            org_svc = OrganizationService(db, org_id)
-            active_types = org_svc.list_employment_types(
-                EmploymentTypeFilters(is_active=True),
-                PaginationParams(limit=500),
-            ).items
-            if active_types:
-                return active_types
-        except Exception:
-            logger.exception("Failed to load active employment types via HR service")
-
-        all_org_types = db.scalars(
-            select(EmploymentType)
-            .where(EmploymentType.organization_id == org_id)
-            .order_by(EmploymentType.type_name)
-        ).all()
-        if all_org_types:
-            return list(all_org_types)
-
-        return list(
-            db.scalars(
-                select(EmploymentType)
-                .join(
-                    Employee,
-                    Employee.employment_type_id == EmploymentType.employment_type_id,
-                )
-                .where(Employee.organization_id == org_id)
-                .distinct()
-                .order_by(EmploymentType.type_name)
-            ).all()
-        )
+        org_id: UUID,
+    ) -> list[EmploymentTypeView]:
+        """Load the complete, name-ordered active People-owned catalogue."""
+        return list(EmploymentTypeService(db, org_id).iter_all(active=True))
 
     def list_runs_response(
         self,
@@ -414,6 +386,13 @@ class RunWebService:
             .order_by(Designation.designation_name)
         ).all()
         employment_types = self._list_employment_types_for_filter(db, org_id)
+        copy_employment_type = (
+            EmploymentTypeService(db, org_id).get_employment_type(
+                source.employment_type_id
+            )
+            if source.employment_type_id
+            else None
+        )
 
         structures = db.scalars(
             select(SalaryStructure)
@@ -481,6 +460,7 @@ class RunWebService:
                 "default_posting": next_end.isoformat(),
                 "form_data": form_data,
                 "copy_from": source,
+                "copy_employment_type": copy_employment_type,
                 "errors": {},
             }
         )

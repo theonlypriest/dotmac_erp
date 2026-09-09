@@ -57,6 +57,11 @@ def test_employee_detail_context_includes_assigned_assets_when_allowed(monkeypat
     org_id = uuid4()
     person_id = uuid4()
     employee = _employee(org_id, person_id)
+    employee.employment_type_id = uuid4()
+    employment_type = SimpleNamespace(
+        employment_type_id=employee.employment_type_id,
+        type_name="Full Time",
+    )
     auth = _auth(org_id)
     auth.has_module_access = lambda module: module == "fixed_assets"
     assigned_asset = SimpleNamespace(asset_id=uuid4(), asset_name="Laptop")
@@ -69,6 +74,19 @@ def test_employee_detail_context_includes_assigned_assets_when_allowed(monkeypat
     monkeypatch.setattr(
         "app.services.people.hr.web.employee_web.get_recent_activity_for_record",
         lambda *_args, **_kwargs: [],
+    )
+
+    class _EmploymentTypeOwner:
+        def __init__(self, _db, organization_id):
+            assert organization_id == org_id
+
+        def get_employment_type(self, employment_type_id):
+            assert employment_type_id == employee.employment_type_id
+            return employment_type
+
+    monkeypatch.setattr(
+        "app.services.people.hr.web.employee_web.EmploymentTypeService",
+        _EmploymentTypeOwner,
     )
 
     class _Resolver:
@@ -114,6 +132,7 @@ def test_employee_detail_context_includes_assigned_assets_when_allowed(monkeypat
 
     assert context["can_view_assigned_assets"] is True
     assert context["assigned_assets"] == [assigned_asset]
+    assert context["employment_type"] is employment_type
     assert captured == {
         "organization_id": org_id,
         "employee_id": employee.employee_id,

@@ -930,6 +930,8 @@ class WebAuthContext:
         user_initials: str = "GU",
         roles: list[str] | None = None,
         scopes: list[str] | None = None,
+        leave_write_restricted: bool = False,
+        leave_restriction_id: UUID | None = None,
     ):
         self.is_authenticated = is_authenticated
         self.person_id = person_id
@@ -939,6 +941,8 @@ class WebAuthContext:
         self.user_initials = user_initials
         self.roles = roles or []
         self.scopes = scopes or []
+        self.leave_write_restricted = leave_write_restricted
+        self.leave_restriction_id = leave_restriction_id
 
     @property
     def user(self) -> dict:
@@ -1088,12 +1092,20 @@ class WebAuthContext:
 
     def has_permission(self, permission: str) -> bool:
         """Check if user has a specific permission."""
-        if self.is_admin:
-            return True
-
         requested = (permission or "").strip()
         if not requested:
             return False
+
+        if self.leave_write_restricted:
+            from app.services.people.hr.staff_access_projection import (
+                is_mutating_permission_key,
+            )
+
+            if is_mutating_permission_key(requested):
+                return False
+
+        if self.is_admin:
+            return True
 
         scopes_set = {scope.strip() for scope in self.scopes}
 
@@ -1114,14 +1126,12 @@ class WebAuthContext:
 
     def has_any_permission(self, permissions: list[str]) -> bool:
         """Check if user has any of the specified permissions."""
-        if self.is_admin:
+        if self.is_admin and not self.leave_write_restricted:
             return True
         return any(self.has_permission(permission) for permission in permissions)
 
     def has_all_permissions(self, permissions: list[str]) -> bool:
         """Check if user has all specified permissions."""
-        if self.is_admin:
-            return True
         return all(self.has_permission(permission) for permission in permissions)
 
     @property
@@ -1276,6 +1286,27 @@ def _load_web_permission_scopes(
     return list({*existing_scopes, *(str(key) for key in permission_rows if key)})
 
 
+def _active_leave_restriction_id(
+    db: Session,
+    organization_id: UUID | None,
+    person_id: UUID,
+) -> UUID | None:
+    if organization_id is None:
+        return None
+    try:
+        from app.services.people.hr.staff_access_projection import (
+            StaffAccessProjectionService,
+        )
+
+        restriction = StaffAccessProjectionService(db).active_restriction_for_person(
+            organization_id,
+            person_id,
+        )
+        return restriction.restriction_id if restriction else None
+    except OperationalError:
+        return None
+
+
 def require_web_auth(
     request: Request,
     authorization: str | None = Header(default=None),
@@ -1421,6 +1452,11 @@ def require_web_auth(
     except OperationalError:
         employee = None
     employee_id = employee.employee_id if employee else None
+    leave_restriction_id = _active_leave_restriction_id(
+        db,
+        organization_id,
+        person_uuid,
+    )
 
     return WebAuthContext(
         is_authenticated=True,
@@ -1431,6 +1467,8 @@ def require_web_auth(
         user_initials=initials,
         roles=roles,
         scopes=scopes,
+        leave_write_restricted=leave_restriction_id is not None,
+        leave_restriction_id=leave_restriction_id,
     )
 
 
@@ -1650,6 +1688,11 @@ def optional_web_auth(
 
     employee = db.scalar(select(Employee).where(Employee.person_id == person_uuid))
     employee_id = employee.employee_id if employee else None
+    leave_restriction_id = _active_leave_restriction_id(
+        db,
+        organization_id,
+        person_uuid,
+    )
 
     return WebAuthContext(
         is_authenticated=True,
@@ -1660,6 +1703,8 @@ def optional_web_auth(
         user_initials=initials,
         roles=roles,
         scopes=scopes,
+        leave_write_restricted=leave_restriction_id is not None,
+        leave_restriction_id=leave_restriction_id,
     )
 
 

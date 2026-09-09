@@ -9,13 +9,13 @@ relation the ledger's
 
 ## WHAT THIS TEST CANNOT PROVE  (design §7.4 — read this before trusting a green run)
 
-1. **An unprotected row is not proved reachable.**  ``app_user`` holds table
-   privileges on 1 of the 420 relations in the design catalog, and no migration
-   under ``alembic/versions/`` issues a table-level ``GRANT ... TO app_user`` —
-   only ``EXECUTE`` on two functions.  Every ``protected_access == no`` row's
-   targets therefore measure ``denied-no-grant`` today.  Asserting reachability
-   now would be 91 red rows on the first run, which is how a gate gets deleted
-   rather than fixed, so
+1. **An unprotected row is not proved reachable.**  ``app_user`` now holds the
+   composed modules' table grants, hosted prerequisite grants, and one reviewed
+   legacy ``SELECT`` on ``hr.employment_type``. None is a target of a
+   ``protected_access == no`` cross-organization ledger row, so those targets
+   still measure ``denied-no-grant`` today. Asserting reachability now would be
+   91 red rows on the first run, which is how a gate gets deleted rather than
+   fixed, so
    :func:`test_unprotected_rows_have_no_reachable_target_yet` records the
    number as a two-directional ratchet.  It becomes a real assertion in the
    change that adds the grants.
@@ -578,10 +578,11 @@ def test_unprotected_rows_have_no_reachable_target_yet(measured) -> None:
 
     A ``protected_access == no`` row claims its caller survives the
     ``app_user`` cutover.  That
-    claim is unfalsifiable until ``app_user`` is granted the reads: no migration
-    issues a table-level ``GRANT ... TO app_user``, so every ``ready`` target
-    measures ``denied-no-grant``.  This ratchets the number DOWN as grants land
-    and fails if it rises.  It becomes
+    claim is unfalsifiable until ``app_user`` is granted those exact target
+    reads. Existing module/host grants and the sealed Employment Type source
+    read do not cover this ledger set, so every ``ready`` target measures
+    ``denied-no-grant``. This ratchets the number DOWN as grants land and fails
+    if it rises. It becomes
     ``assert unreachable == 0`` in the change that adds the grants — that change
     is where the reachability direction turns into a real assertion.
     """
@@ -594,8 +595,8 @@ def test_unprotected_rows_have_no_reachable_target_yet(measured) -> None:
             for relation in gate.row_relations(row)
         )
     )
-    # 91 unprotected rows, all of them. app_user holds SELECT on 1 of 420
-    # relations and none of the ledger's 48 application targets is that one.
+    # 91 unprotected rows, all of them. The new hr.employment_type grant is not a
+    # target of any of these cross-organization caller rows.
     baseline = 91
     assert len(unreachable) == baseline, (
         f"{len(unreachable)} unprotected rows still have an unreachable "

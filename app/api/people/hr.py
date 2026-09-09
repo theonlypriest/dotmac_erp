@@ -6,6 +6,7 @@ Thin API wrapper for HR Core endpoints. All business logic is in services.
 
 import json
 from collections.abc import Set as AbstractSet
+from dataclasses import dataclass
 from uuid import UUID
 
 from fastapi import (
@@ -19,7 +20,12 @@ from fastapi import (
 )
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db_with_org, require_organization_id, require_tenant_auth
+from app.api.deps import (
+    get_db_with_org,
+    require_organization_id,
+    require_tenant_auth,
+    require_tenant_permission,
+)
 from app.models.finance.core_org.location import LocationType
 from app.models.people.hr.checklist_template import ChecklistTemplateType
 from app.net import get_request_host, get_request_scheme
@@ -94,12 +100,23 @@ from app.services.people.hr.employee_filter_engine import (
     parse_employee_filter_payload_json,
 )
 from app.services.people.hr.employees import send_employee_access_invite_background
+from app.services.people.hr.employment_types import EmploymentTypeService
 
 router = APIRouter(
     prefix="/hr",
     tags=["hr"],
     dependencies=[Depends(require_tenant_auth)],
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _EmploymentTypeActor:
+    id: UUID
+
+
+def _employment_type_actor(auth: dict) -> _EmploymentTypeActor | None:
+    person_id = auth.get("person_id")
+    return _EmploymentTypeActor(UUID(str(person_id))) if person_id else None
 
 
 def _resolve_app_url(request: Request) -> str:
@@ -526,10 +543,11 @@ def list_employment_types(
     is_active: bool | None = None,
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
+    _auth: dict = Depends(require_tenant_permission("hr:employment_types:read")),
     db: Session = Depends(get_db_with_org),
 ):
     """List employment types."""
-    svc = OrganizationService(db, organization_id)
+    svc = EmploymentTypeService(db, organization_id, _employment_type_actor(_auth))
     filters = EmploymentTypeFilters(search=search, is_active=is_active)
     result = svc.list_employment_types(
         filters, PaginationParams(offset=offset, limit=limit)
@@ -550,10 +568,11 @@ def list_employment_types(
 def create_employment_type(
     payload: EmploymentTypeCreate,
     organization_id: UUID = Depends(require_organization_id),
+    _auth: dict = Depends(require_tenant_permission("hr:employment_types:manage")),
     db: Session = Depends(get_db_with_org),
 ):
     """Create an employment type."""
-    svc = OrganizationService(db, organization_id)
+    svc = EmploymentTypeService(db, organization_id, _employment_type_actor(_auth))
     data = EmploymentTypeCreateData(
         type_code=payload.type_code,
         type_name=payload.type_name,
@@ -568,10 +587,11 @@ def create_employment_type(
 def get_employment_type(
     employment_type_id: UUID,
     organization_id: UUID = Depends(require_organization_id),
+    _auth: dict = Depends(require_tenant_permission("hr:employment_types:read")),
     db: Session = Depends(get_db_with_org),
 ):
     """Get an employment type by ID."""
-    svc = OrganizationService(db, organization_id)
+    svc = EmploymentTypeService(db, organization_id, _employment_type_actor(_auth))
     return EmploymentTypeRead.model_validate(
         svc.get_employment_type(employment_type_id)
     )
@@ -584,14 +604,16 @@ def update_employment_type(
     employment_type_id: UUID,
     payload: EmploymentTypeUpdate,
     organization_id: UUID = Depends(require_organization_id),
+    _auth: dict = Depends(require_tenant_permission("hr:employment_types:manage")),
     db: Session = Depends(get_db_with_org),
 ):
     """Update an employment type."""
-    svc = OrganizationService(db, organization_id)
+    svc = EmploymentTypeService(db, organization_id, _employment_type_actor(_auth))
     data = EmploymentTypeUpdateData(
         type_code=payload.type_code,
         type_name=payload.type_name,
         description=payload.description,
+        description_is_set="description" in payload.model_fields_set,
         is_active=payload.is_active,
     )
     emp_type = svc.update_employment_type(employment_type_id, data)
@@ -604,11 +626,12 @@ def update_employment_type(
 def delete_employment_type(
     employment_type_id: UUID,
     organization_id: UUID = Depends(require_organization_id),
+    _auth: dict = Depends(require_tenant_permission("hr:employment_types:manage")),
     db: Session = Depends(get_db_with_org),
 ):
-    """Delete an employment type."""
-    svc = OrganizationService(db, organization_id)
-    svc.delete_employment_type(employment_type_id)
+    """Deactivate an employment type."""
+    svc = EmploymentTypeService(db, organization_id, _employment_type_actor(_auth))
+    svc.deactivate_employment_type(employment_type_id)
 
 
 # =============================================================================

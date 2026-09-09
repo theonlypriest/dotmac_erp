@@ -4366,6 +4366,19 @@
     "422": "a11c9d9b2af8"
    }
   },
+  "GET /api/v1/sync/sub/staff-access/projection": {
+   "params": [
+    "header:x-api-key!",
+    "query:entity!",
+    "query:limit",
+    "query:updated_after"
+   ],
+   "request": null,
+   "responses": {
+    "200": "d5e1eabbc1c7",
+    "422": "a11c9d9b2af8"
+   }
+  },
   "GET /api/v1/tax/codes": {
    "params": [
     "cookie:access_token",
@@ -9723,6 +9736,10 @@
   "ShiftTypeBrief": "428167c69d59",
   "SidebarStyle": "e965a6e895ba",
   "SingleLineTaxRequest": "6d65c9e33715",
+  "StaffAccessProjectionEntity": "71440461be55",
+  "StaffAccessProjectionPage": "b86fb9dcc6ff",
+  "StaffAccountStatusProjectionRead": "9083beeea756",
+  "StaffLeaveRestrictionProjection": "f6d864881889",
   "StatementImportResult": "c1304047bdb0",
   "StatementLineType": "86bfdc050ad2",
   "StatementSummary": "861aad30c6c6",

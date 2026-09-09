@@ -4,10 +4,32 @@ import csv
 import io
 from decimal import Decimal
 from types import SimpleNamespace
+from uuid import UUID, uuid4
+
+import pytest
 
 from app.services.people.payroll.nhf_export import NHFExportService
 from app.services.people.payroll.paye_export import PAYEExportService
 from app.services.people.payroll.pension_export import PensionExportService
+from app.services.people.payroll.employment_type_classification import (
+    PayrollEmploymentTypeClassification,
+)
+
+_EMPLOYMENT_TYPE_CODES: dict[UUID, str] = {}
+
+
+@pytest.fixture(autouse=True)
+def _authoritative_payroll_classification(monkeypatch):
+    def classify(_db, *, organization_id, employment_type_id):
+        assert organization_id is not None
+        return PayrollEmploymentTypeClassification(
+            _EMPLOYMENT_TYPE_CODES[employment_type_id]
+        )
+
+    monkeypatch.setattr(
+        "app.services.people.payroll.paye_export.classify_payroll_employment_type",
+        classify,
+    )
 
 
 def _make_component(code: str) -> SimpleNamespace:
@@ -25,7 +47,6 @@ def _make_deduction(code: str, amount: str) -> SimpleNamespace:
 def _make_employee(
     tax_state: str = "Lagos",
     employment_type_code: str = "permanent",
-    employment_type_name: str = "Permanent",
 ) -> SimpleNamespace:
     designation = SimpleNamespace(designation_name="Analyst")
     tax_profile = SimpleNamespace(
@@ -36,16 +57,15 @@ def _make_employee(
         pfa=None,
         nhf_number="NHF001",
     )
-    employment_type = SimpleNamespace(
-        type_code=employment_type_code,
-        type_name=employment_type_name,
-    )
+    employment_type_id = uuid4()
+    _EMPLOYMENT_TYPE_CODES[employment_type_id] = employment_type_code.upper()
     return SimpleNamespace(
+        organization_id=uuid4(),
+        employment_type_id=employment_type_id,
         full_name="Jane Doe",
         designation=designation,
         employee_code="EMP001",
         employee_number="EMP001",
-        employment_type=employment_type,
         current_tax_profile=tax_profile,
     )
 
@@ -250,7 +270,6 @@ def test_paye_exports_route_permanent_staff_by_tax_state():
         employee=_make_employee(
             tax_state="Lagos",
             employment_type_code="contract",
-            employment_type_name="Contract",
         ),
         gross_pay=Decimal("900.00"),
         earnings=[_make_earning("BASIC", "900")],

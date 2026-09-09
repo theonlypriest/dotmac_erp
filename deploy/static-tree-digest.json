@@ -1,0 +1,32 @@
+{
+  "$comment": [
+    "Expected digest of the static tree the application SERVES.",
+    "",
+    "Why this file and not deploy/product.toml: ProductDeploymentSpec.v1, as",
+    "implemented by the pinned dotmac-deployment-foundation==0.2.0a2, has no",
+    "field for a served-asset digest and refuses unknown keys at parse time",
+    "(the same strictness that refuses static = 'volume'). Inventing a key",
+    "would fail 'deployment / Deployment descriptor conformance'. This is a",
+    "PRODUCT-LOCAL record pending a first-class descriptor field in the shared",
+    "facility; when one exists, this file collapses into the descriptor.",
+    "",
+    "What it is for: ERP served a stylesheet 198 insertions behind its own",
+    "image for an unknown period, missing dark-mode and accent utilities. Two",
+    "paths carried the checkout to the browser -- a compose bind mount over",
+    "/app/static, and sync-static.sh rsyncing the checkout into the nginx web",
+    "root, which nginx served ahead of the application. Both are now retired.",
+    "An internal check of the image would have passed the entire time, because",
+    "the image was correct. Only comparing what is ACTUALLY SERVED against a",
+    "recorded digest catches this class of defect.",
+    "",
+    "Recompute: python scripts/static_tree_digest.py static",
+    "Verify what a container serves: python scripts/static_tree_digest.py \\",
+    "    --container dotmac_erp_app /app/static --expect <digest>"
+  ],
+  "schema": "dotmac.erp.static-tree-digest.v1",
+  "algorithm": "sha256 over a manifest of '<sha256>  <relpath>' lines sorted by path",
+  "root": "static",
+  "served_at": "/static/",
+  "file_count": 70,
+  "tree_digest": "sha256:0e957da57ac90f9e029e1b55bc3095273db1536b7aca6f3cbf8950896233f066"
+}

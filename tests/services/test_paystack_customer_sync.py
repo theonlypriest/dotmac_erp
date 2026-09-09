@@ -43,10 +43,15 @@ def _db(customers):
 
 def _patched(client):
     """Patch the settings resolver and the Paystack client together."""
+
+    def _resolve_value(db, domain, key, *, organization_id):
+        assert organization_id == ORG
+        return "sk_test"
+
     return (
         patch(
             "app.services.settings_spec.resolve_value",
-            side_effect=lambda db, domain, key: "sk_test",
+            side_effect=_resolve_value,
         ),
         patch(
             "app.services.finance.payments.paystack_client.PaystackClient",
@@ -160,7 +165,7 @@ def test_one_failure_does_not_abort_the_rest():
 def test_missing_credentials_fail_loudly_rather_than_sending_empty_keys():
     with patch(
         "app.services.settings_spec.resolve_value",
-        side_effect=lambda db, domain, key: None,
+        side_effect=lambda db, domain, key, *, organization_id: None,
     ):
         try:
             sync_customers(_db([]), organization_id=ORG, dry_run=False)

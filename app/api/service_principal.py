@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings as app_settings
 from app.db import SessionLocal
-from app.db.session_context import allow_cross_org, prime_session
+from app.db.session_context import allow_cross_org, tenant_scope_for_session
 from app.models.auth import ApiKey
 from app.models.person import Person
 from app.rls import set_current_organization_sync
@@ -150,16 +150,15 @@ def require_any_service_scope(*required: str):
 
 
 def get_db_with_service_org(auth: dict = Depends(require_service_auth)):
-    """Yield an auto-committing tenant-primed service-principal session."""
+    """Yield a service session whose tenant scope survives intermediate commits."""
     organization_id = auth["organization_id"]
     if not isinstance(organization_id, UUID):
         organization_id = UUID(str(organization_id))
     db = SessionLocal()
     try:
-        prime_session(db, organization_id)
-        set_current_organization_sync(db, organization_id)
-        yield db
-        db.commit()
+        with tenant_scope_for_session(db, organization_id):
+            yield db
+            db.commit()
     except Exception:
         db.rollback()
         raise

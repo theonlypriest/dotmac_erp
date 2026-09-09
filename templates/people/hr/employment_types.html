@@ -14,10 +14,12 @@
 {% endblock %}
 
 {% block header_actions %}
+{% if can_manage_employment_types %}
 <a href="/people/hr/employment-types/new" class="btn btn-primary">
     {{ icon_svg("plus", "h-4 w-4 mr-1.5") }}
     New Employment Type
 </a>
+{% endif %}
 {% endblock %}
 
 {% block content %}
@@ -67,18 +69,24 @@
                             {% endif %}
                         </td>
                         <td class="text-right">
+                            {% if can_manage_employment_types %}
                             <a href="/people/hr/employment-types/{{ emp_type.employment_type_id }}/edit"
                                class="text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
                                aria-label="Edit {{ emp_type.type_name }}" title="Edit employment type">
                                 {{ icon_svg("edit", "h-4 w-4 inline") }}
                             </a>
+                            {% else %}
+                            <span aria-label="Read only">-</span>
+                            {% endif %}
                         </td>
                     </tr>
                     {% else %}
                     <tr>
                         <td colspan="5" class="text-center py-8 text-slate-500">
                             No employment types found.
+                            {% if can_manage_employment_types %}
                             <a href="/people/hr/employment-types/new" class="text-teal-600 hover:text-teal-700">Create your first employment type</a>
+                            {% endif %}
                         </td>
                     </tr>
                     {% endfor %}

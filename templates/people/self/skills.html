@@ -14,7 +14,9 @@
 {% endblock %}
 
 {% block content %}
-<div class="mx-auto max-w-6xl space-y-6">
+<div id="extended-profile-content" class="mx-auto max-w-6xl space-y-6"
+     hx-boost="true" hx-target="#extended-profile-content"
+     hx-select="#extended-profile-content" hx-swap="outerHTML" hx-push-url="false">
     <div class="card p-6">
         <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div>
@@ -27,15 +29,6 @@
                 {{ status_badge('PENDING', 'sm') }}
                 {% endif %}
             </div>
-        </div>
-    </div>
-    <div class="card p-4">
-        <div class="flex flex-wrap gap-2">
-            <a href="/people/self/qualifications" class="btn btn-secondary">Qualifications</a>
-            <a href="/people/self/certifications" class="btn btn-secondary">Certifications</a>
-            <a href="/people/self/skills" class="btn btn-secondary">Skills</a>
-            <a href="/people/self/dependents" class="btn btn-secondary">Dependants</a>
-            <a href="/people/self/documents" class="btn btn-secondary">My Documents</a>
         </div>
     </div>
     {% if success %}<div class="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-700 dark:border-emerald-800 dark:bg-emerald-900/20 dark:text-emerald-300">{{ success }}</div>{% endif %}
@@ -60,7 +53,7 @@
     </div>
 
     {% if edit_record %}
-    <form method="post" class="card p-6 space-y-4">
+    <form method="post" action="/people/self/skills" class="card p-6 space-y-4">
         {{ request.state.csrf_form | safe }}
         <input type="hidden" name="employee_skill_id" value="{{ edit_record.employee_skill_id }}">
         <div><h3 class="text-lg font-semibold text-slate-900 dark:text-white">Edit Skill</h3><p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Updates are submitted one at a time for approval.</p></div>
@@ -84,7 +77,7 @@
         <div class="flex justify-end gap-3"><a href="/people/self/skills" class="btn btn-secondary">Cancel</a><button type="submit" class="btn btn-primary">Submit for HR Approval</button></div>
     </form>
     {% else %}
-    <form method="post" class="card p-6 space-y-6"
+    <form method="post" action="/people/self/skills" class="card p-6 space-y-6"
           x-data='{
               rows: {{ form_rows | tojson | safe }},
               maxRows: {{ max_batch_items }},

@@ -28,6 +28,7 @@ from app.models.people.hr.position_assignment import (
     PositionAssignment,
     PositionAssignmentType,
 )
+from app.models.notification import Notification, NotificationType
 from app.models.person import Person
 from app.services.expense import (
     ExpenseApprovalService,
@@ -528,12 +529,27 @@ def test_resubmit_preserves_prior_approval_round_and_submit_creates_new_round(
         "app.services.finance.automation.event_dispatcher.fire_workflow_event",
         lambda *args, **kwargs: None,
     )
+    monkeypatch.setattr(
+        "app.services.expense.expense_notifications.ExpenseNotificationService.notify_approval_needed",
+        lambda self, claim, approver: True,
+    )
 
     svc = ExpenseService(db_session)
     submit_result = svc.submit_claim(org_id, claim.claim_id, skip_limit_check=True)
     db_session.commit()
 
     assert submit_result.claim.status == ExpenseClaimStatus.PENDING_APPROVAL
+    first_round_notifications = list(
+        db_session.scalars(
+            select(Notification).where(
+                Notification.entity_id == claim.claim_id,
+                Notification.notification_type == NotificationType.SUBMITTED,
+            )
+        ).all()
+    )
+    assert len(first_round_notifications) == 1
+    assert first_round_notifications[0].recipient_id == approver.person_id
+    assert first_round_notifications[0].email_sent is True
 
     rejected = svc.reject_claim(
         org_id,
@@ -568,6 +584,16 @@ def test_resubmit_preserves_prior_approval_round_and_submit_creates_new_round(
     )
     assert rounds[0] == (1, "REJECTED")
     assert rounds[-1] == (2, None)
+
+    submission_notifications = list(
+        db_session.scalars(
+            select(Notification).where(
+                Notification.entity_id == claim.claim_id,
+                Notification.notification_type == NotificationType.SUBMITTED,
+            )
+        ).all()
+    )
+    assert len(submission_notifications) == 2
 
     submit_marker = db_session.scalar(
         select(ExpenseClaimAction).where(

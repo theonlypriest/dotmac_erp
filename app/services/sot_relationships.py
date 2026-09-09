@@ -309,14 +309,40 @@ DOMAIN_SOT_RELATIONSHIPS: tuple[DomainSOT, ...] = (
                     "PaymentIntent.status - every transition, from every trigger",
                     "transfer initiation, completion, failure and reversal",
                     "scheduled reconciliation of in-flight transfers",
+                    "the distinction between an observed verdict and an "
+                    "unobserved outcome (INDETERMINATE + unresolved_since)",
+                    "resolution of unresolved payouts - the only writer that "
+                    "may move an intent out of INDETERMINATE",
                 ),
                 notes=(
                     "Sole writer of payments.payment_intent.status. The webhook "
-                    "receiver, the API routes and the scheduled poller are all "
+                    "receiver, the API routes and both scheduled reconcilers are "
                     "adapters over this service; none of them decides a status "
-                    "itself. Enforced by tests/architecture/"
-                    "test_payment_intent_status_single_owner.py. Implemented and "
-                    "tested; production enablement unconfirmed."
+                    "itself. It also owns what the column may CLAIM: FAILED "
+                    "requires that Paystack answered, and an outcome that was "
+                    "not observed is INDETERMINATE, never FAILED or EXPIRED "
+                    "(ADR-0007, adopting dotmac_starter_mt ADR-0032). Enforced "
+                    "by tests/architecture/"
+                    "test_payment_intent_status_single_owner.py and "
+                    "tests/architecture/test_unobserved_is_not_a_verdict.py. "
+                    "Implemented and tested; production enablement unconfirmed."
+                ),
+            ),
+            SOTService(
+                name="payments.provider_transport",
+                module="app.services.finance.payments.paystack_client",
+                owns=(
+                    "Paystack HTTP transport and response parsing",
+                    "the transport-failure vs provider-verdict distinction "
+                    "(PaystackUnreachable vs PaystackError)",
+                ),
+                notes=(
+                    "Transport only: it never touches an intent. Its one "
+                    "authority is telling callers whether Paystack ANSWERED. "
+                    "Every httpx.RequestError site and every 5xx raises "
+                    "PaystackUnreachable; plain PaystackError means a parsed "
+                    "provider refusal. Collapsing the two is what let a "
+                    "connect timeout be recorded as a failed payout."
                 ),
             ),
             SOTService(
@@ -338,10 +364,12 @@ DOMAIN_SOT_RELATIONSHIPS: tuple[DomainSOT, ...] = (
             "app.tasks.expense",
         ),
         rule=(
-            "One service decides what a payment intent's status is. Webhooks, "
-            "routes and schedulers validate, authorize and delegate; a second "
-            "writer is how a settled transfer gets reopened or an in-flight "
-            "payout gets stamped expired."
+            "One service decides what a payment intent's status is, and it may "
+            "only claim what was observed. Webhooks, routes and schedulers "
+            "validate, authorize and delegate; a second writer is how a settled "
+            "transfer gets reopened or an in-flight payout gets stamped "
+            "expired, and an unobserved outcome recorded as FAILED is how a "
+            "payout that may already have gone gets sent again."
         ),
     ),
     DomainSOT(

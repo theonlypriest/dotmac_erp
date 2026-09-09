@@ -1,5 +1,5 @@
 {% extends "inventory/base_inventory.html" %}
-{% from "components/macros.html" import empty_state, icon_svg %}
+{% from "components/macros.html" import empty_state, icon_svg, status_badge %}
 
 {% block page_title %}Receipt Approvals{% endblock %}
 
@@ -63,13 +63,7 @@
                             <td class="text-right font-mono text-sm">{{ approval.approved_quantity if approval.approved_quantity else "-" }}</td>
                             <td class="text-sm text-slate-700 dark:text-slate-200">{{ approval.warehouse_name if approval.warehouse_name else "Unassigned" }}</td>
                             <td>
-                                {% set status_classes = {
-                                    "PENDING": "bg-amber-50 text-amber-700 ring-amber-200 dark:bg-amber-900/20 dark:text-amber-300 dark:ring-amber-800",
-                                    "PARTIALLY_RECEIVED": "bg-blue-50 text-blue-700 ring-blue-200 dark:bg-blue-900/20 dark:text-blue-300 dark:ring-blue-800",
-                                    "POSTED_TO_INVENTORY": "bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-900/20 dark:text-emerald-300 dark:ring-emerald-800",
-                                    "REJECTED": "bg-rose-50 text-rose-700 ring-rose-200 dark:bg-rose-900/20 dark:text-rose-300 dark:ring-rose-800"
-                                } %}
-                                <span class="inline-flex rounded-full px-2 py-1 text-xs font-semibold ring-1 {{ status_classes.get(approval.status, 'bg-slate-50 text-slate-700 ring-slate-200') }}">{{ approval.status | replace("_", " ") | title }}</span>
+                                {{ status_badge(approval.status, "sm") }}
                             </td>
                             <td>
                                 <div class="text-sm text-slate-700 dark:text-slate-200">{{ approval.submitted_by_name if approval.submitted_by_name else "Unknown" }}</div>

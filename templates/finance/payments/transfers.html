@@ -15,7 +15,7 @@
 {% block content %}
 <div class="space-y-6 stagger-in">
     <!-- Stat Cards -->
-    <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+    <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
         <div class="card p-5">
             <div class="flex items-center gap-3">
                 <div class="card-icon bg-teal-50 text-teal-600 dark:bg-teal-900/30 dark:text-teal-400">
@@ -57,6 +57,20 @@
                 <div>
                     <p class="text-2xl font-bold text-slate-900 dark:text-white font-display">{{ stat_failed }}</p>
                     <p class="text-xs text-slate-500 dark:text-slate-400">Failed</p>
+                </div>
+            </div>
+        </div>
+        {# Separate from Failed on purpose: these are payouts nobody can account
+           for, not payouts that did not happen. Folding them into the Failed
+           count would hide the only number an operator has to act on. #}
+        <div class="card p-5">
+            <div class="flex items-center gap-3">
+                <div class="card-icon bg-amber-50 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400">
+                    {{ icon_svg("warning") }}
+                </div>
+                <div>
+                    <p class="text-2xl font-bold text-slate-900 dark:text-white font-display">{{ stat_indeterminate if stat_indeterminate else 0 }}</p>
+                    <p class="text-xs text-slate-500 dark:text-slate-400">Outcome Unknown</p>
                 </div>
             </div>
         </div>

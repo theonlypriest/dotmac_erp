@@ -4,7 +4,7 @@ from uuid import uuid4
 
 from app.models.person import PersonStatus
 from app.tasks import notifications as notification_tasks
-from tests._helpers.session_mocks import session_context
+from tests._helpers.session_mocks import org_session_context
 
 
 def test_process_pending_notification_emails_skips_inactive_people(monkeypatch):
@@ -29,8 +29,13 @@ def test_process_pending_notification_emails_skips_inactive_people(monkeypatch):
 
     monkeypatch.setattr(
         notification_tasks,
-        "cross_org_session",
-        session_context(mock_db),
+        "active_organization_ids",
+        lambda: [notification.organization_id],
+    )
+    monkeypatch.setattr(
+        notification_tasks,
+        "session_for_org",
+        org_session_context(mock_db),
     )
 
     send_calls: list[str] = []

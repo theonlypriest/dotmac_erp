@@ -21,6 +21,7 @@
         <input type="hidden" name="status_group" value="{{ status_group if status_group else '' }}">
         <input type="hidden" name="start_date" value="{{ start_date if start_date else '' }}">
         <input type="hidden" name="end_date" value="{{ end_date if end_date else '' }}">
+        <input type="hidden" name="employment_type_id" value="{{ employment_type_id | default('', true) }}">
         <button type="submit" class="btn btn-secondary">
             <svg class="h-4 w-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3M5 20h14a2 2 0 002-2v-4M3 14v4a2 2 0 002 2h2"/>
@@ -106,6 +107,14 @@
             <option value="">All Statuses</option>
             {% for s in statuses %}
             <option value="{{ s }}" {{ 'selected' if status == s else '' }}>{{ s | title }}</option>
+            {% endfor %}
+        </select>
+        <select aria-label="Filter by employment type" name="employment_type_id" class="form-select" {{ filter_attrs }}>
+            <option value="">All employment types</option>
+            {% for employment_type in employment_types %}
+            <option value="{{ employment_type.employment_type_id }}" {{ 'selected' if employment_type_id == employment_type.employment_type_id | string else '' }}>
+                {{ employment_type.type_name }}
+            </option>
             {% endfor %}
         </select>
     {% endcall %}
@@ -205,7 +214,7 @@
         total_count=total_count,
         limit=limit,
         search=search,
-        filters={"status": status, "status_group": status_group, "start_date": start_date, "end_date": end_date}
+        filters={"status": status, "status_group": status_group, "start_date": start_date, "end_date": end_date, "employment_type_id": employment_type_id}
     ) }}
 
     {% else %}

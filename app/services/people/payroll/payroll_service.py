@@ -38,6 +38,7 @@ from app.models.people.payroll.salary_structure import (
 )
 from app.services.common import PaginatedResult, PaginationParams, coerce_uuid
 from app.services.finance.platform.org_context import org_context_service
+from app.services.people.hr.employment_types import EmploymentTypeService
 from app.services.people.integrations.payroll_gl_adapter import PayrollGLAdapter
 from app.services.people.payroll.disbursement import record_disbursement
 from app.services.people.payroll.eligibility import (
@@ -616,6 +617,9 @@ class PayrollService:
         from app.models.finance.core_config.numbering_sequence import SequenceType
         from app.services.finance.common.numbering import SyncNumberingService
 
+        if employment_type_id is not None:
+            EmploymentTypeService(self.db, org_id).require_active(employment_type_id)
+
         entry_number = SyncNumberingService(self.db).generate_next_number(
             org_id, SequenceType.PAYROLL_ENTRY, reference_date=posting_date
         )
@@ -653,6 +657,12 @@ class PayrollService:
         if entry.salary_slips_created:
             raise PayrollServiceError(
                 "Cannot update payroll entry after slips are created"
+            )
+
+        employment_type_id = kwargs.get("employment_type_id")
+        if employment_type_id is not None:
+            EmploymentTypeService(self.db, org_id).require_active(
+                coerce_uuid(employment_type_id)
             )
 
         for key, value in kwargs.items():
@@ -1430,8 +1440,12 @@ class PayrollService:
             )
             .where(
                 SalarySlip.organization_id == org_id,
+                SalarySlip.status.in_(
+                    [SalarySlipStatus.APPROVED, SalarySlipStatus.POSTED]
+                ),
                 SalarySlip.start_date >= start_date,
                 SalarySlip.end_date <= end_date,
+                SalarySlipDeduction.do_not_include_in_total.is_(False),
             )
             .group_by(
                 SalaryComponent.component_id,

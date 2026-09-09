@@ -93,12 +93,19 @@ class PurchaseOrder(Base):
         Numeric(20, 6), nullable=False, default=0
     )
     total_amount: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
-    amount_invoiced: Mapped[Decimal] = mapped_column(
-        Numeric(20, 6), nullable=False, default=0
-    )
-    amount_received: Mapped[Decimal] = mapped_column(
-        Numeric(20, 6), nullable=False, default=0
-    )
+
+    # `amount_invoiced` and `amount_received` are DELIBERATELY absent.
+    #
+    # They were stored columns on this row with split authority: `amount_received`
+    # had one absolute writer and one incremental writer that disagreed, and
+    # `amount_invoiced` had no writer at all and was permanently zero while the
+    # detail screen rendered it as a financial fact.  Both are derivable from the
+    # authoritative receipt and invoice records, so they are now derived, by one
+    # named owner: `app.services.finance.ap.purchase_order_amounts`.
+    #
+    # Do not add either column back.  A row whose columns are owned by different
+    # authorities cannot be transferred as a unit, which is why the storage is
+    # separated rather than the writers merely coordinated.
 
     # Status
     status: Mapped[POStatus] = mapped_column(

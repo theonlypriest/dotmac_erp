@@ -29,7 +29,7 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from ._base import next_watermark
+from ._base import SyncWatermarkPosition, _aware_utc, next_watermark
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from app.services.dotmac_sub.client import DotmacSubParseError
@@ -105,3 +105,76 @@ class WatermarkProgress:
             )
             return
         advance(next_watermark(self.watermark, self.max_ok, self.min_error))
+
+
+class WatermarkPositionProgress:
+    """Progress tracker for feeds with ``updated_at, id`` continuation."""
+
+    def __init__(self, position: SyncWatermarkPosition, *, label: str) -> None:
+        self.position = position
+        self.label = label
+        self.last_success = position
+        self.first_failure: SyncWatermarkPosition | None = None
+        self.frozen = False
+
+    def record_success(
+        self, row_updated_at: datetime | None, row_external_id: str | None
+    ) -> None:
+        if (
+            row_updated_at is None
+            or row_external_id is None
+            or self.first_failure is not None
+        ):
+            return
+        candidate = SyncWatermarkPosition(row_updated_at, str(row_external_id))
+        if _position_after(candidate, self.last_success):
+            self.last_success = candidate
+
+    def record_failure(
+        self, row_updated_at: datetime | None, row_external_id: str | None
+    ) -> None:
+        if row_updated_at is None or row_external_id is None:
+            self.frozen = True
+            return
+        candidate = SyncWatermarkPosition(row_updated_at, str(row_external_id))
+        if self.first_failure is None or _position_after(self.first_failure, candidate):
+            self.first_failure = candidate
+
+    def parse_error_collector(
+        self, result: SyncResult
+    ) -> Callable[[DotmacSubParseError], None]:
+        def _collect(exc: DotmacSubParseError) -> None:
+            result.errors.append(str(exc))
+            logger.error("Rejected dotmac_sub %s row at parse: %s", self.label, exc)
+            # Parse errors do not expose a structured source id, so advancing
+            # would risk skipping the rejected row within an identical-timestamp
+            # group. Freeze and retry from the pre-run cursor.
+            self.record_failure(exc.updated_at, None)
+
+        return _collect
+
+    def conclude(self, advance: Callable[[SyncWatermarkPosition | None], None]) -> None:
+        if self.frozen:
+            logger.warning(
+                "%s sync compound watermark frozen: a failed row had no usable "
+                "updated_at/id position; holding the pre-run cursor",
+                self.label,
+            )
+            return
+        advance(self.last_success)
+
+
+def _position_after(left: SyncWatermarkPosition, right: SyncWatermarkPosition) -> bool:
+    if left.watermark_at is None:
+        return False
+    if right.watermark_at is None:
+        return True
+    left_at = _aware_utc(left.watermark_at)
+    right_at = _aware_utc(right.watermark_at)
+    if left_at != right_at:
+        return left_at > right_at
+    if left.external_id is None:
+        return False
+    if right.external_id is None:
+        return True
+    return left.external_id > right.external_id

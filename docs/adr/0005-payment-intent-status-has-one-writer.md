@@ -57,9 +57,9 @@ with a `status`.
 
 ### 2. The poller is an adapter
 
-`poll_stuck_expense_transfers` keeps only what a scheduler owns: cross-tenant
-discovery of which organizations have work, one `session_for_org` per tenant,
-and the aggregation of results into its return dict. Selection predicates,
+`poll_stuck_expense_transfers` keeps only what a scheduler owns: enumerating
+tenants, one `session_for_org` per tenant, and the aggregation of results into
+its return dict. Selection predicates,
 credential resolution, the PENDING-to-PROCESSING promotion, attempt counting
 and the circuit breaker all moved to `PaymentService`
 (`find_stale_pending_transfer_intents`, `find_stuck_transfer_intents`,
@@ -137,4 +137,35 @@ the build instead of passing over nothing.
   zero rows once the runtime stops being `postgres` — but it is already
   dispositioned as `retire_with_domain_cutover` in
   `docs/inventories/rls-cross-org-callers.tsv`, and changing the discovery
-  shape here would mix two decisions in one change.
+  shape here would mix two decisions in one change. *(Superseded by the
+  amendment below, which is that separate change.)*
+
+## Amendment — 2026-08-28: the selections run inside the tenant session
+
+`find_stale_pending_transfer_intents` and `find_stuck_transfer_intents` were
+written to run under `cross_org_session()` and return organization -> intent
+ids, so the poller learnt which tenants had work before opening any tenant
+session. `cross_org_session` lifts only the SQLAlchemy listener and never
+PostgreSQL RLS: under `app_user` both selections return zero rows, no stale
+payout expires, no stuck transfer is polled, and the job reports a clean run
+every two minutes.
+
+The poller now enumerates tenants through `for_each_organization` (the narrow
+`tenant_catalog` definer) and runs each selection inside that tenant's own
+session. Nothing about §1 or §3 changes: the selections are still
+`PaymentService`'s, it is still the sole writer of the column, and each intent
+is still taken by id and re-proved `FOR UPDATE` before it is written. Only the
+session the selection runs on moved — the same predicate, evaluated where the
+database can scope it.
+
+The grouping is kept rather than flattened: inside a tenant session the mapping
+has at most one key, and reading it back by the organization whose session the
+worker holds is the isolation assertion.
+
+`reconcile_unresolved_expense_transfers`, the hourly slow lane added by
+ADR-0007, needed no conversion: it already discovers tenant identifiers through
+`app.tenant_catalog.organization_ids` and reads every payout row inside
+`session_for_org`, which is the same catalogue `for_each_organization` calls. It
+keeps the two-pass spelling because it publishes the backlog-age gauge from the
+first pass before any provider I/O, and collapsing that into one loop would make
+an unconfigured tenant vanish from the metric it exists to raise.

@@ -47,7 +47,11 @@
   'PENDING_STOCK': 'badge-pending',
   'PENDING STOCK': 'badge-pending',
   'POSTED': 'badge-posted',
+  'POSTED_TO_INVENTORY': 'badge-posted',
+  'POSTED TO INVENTORY': 'badge-posted',
   'APPROVED': 'badge-approved',
+  'BUDGET_VERIFIED': 'badge-approved',
+  'BUDGET VERIFIED': 'badge-approved',
   'PAID': 'badge-paid',
   'IMPORTED': 'badge-pending',
   'COMPLETED': 'badge-paid',
@@ -62,6 +66,7 @@
   'FULLY_DEPRECIATED': 'badge-draft',
   'FULLY DEPRECIATED': 'badge-draft',
   'ACTIVE': 'badge-approved',
+  'CONVERTED': 'badge-approved',
   'PARTIALLY_PAID': 'badge-pending',
   'OVERDUE': 'badge-overdue',
   'PAST DUE': 'badge-overdue',
@@ -74,6 +79,8 @@
   'CLOSED': 'badge-draft',
   'QUARANTINED': 'badge-overdue',
   'EXPIRED': 'badge-rejected',
+  'INDETERMINATE': 'badge-overdue',
+  'UNRESOLVED': 'badge-overdue',
   'DEPLETED': 'badge-draft',
   'AVAILABLE': 'badge-approved',
   'IN_PROGRESS': 'badge-pending',
@@ -104,6 +111,8 @@
 } %}
 {% set badge_symbol = {
   'APPROVED': '+',
+  'BUDGET_VERIFIED': '+',
+  'BUDGET VERIFIED': '+',
   'PAID': '+',
   'ACTIVE': '+',
   'IN_USE': '+',
@@ -117,7 +126,11 @@
   'UNDER REPAIR': '!',
   'RETIRED': 'x',
   'COMPLETED': '+',
+  'POSTED_TO_INVENTORY': '+',
+  'POSTED TO INVENTORY': '+',
   'PENDING': '!',
+  'PARTIALLY_RECEIVED': '!',
+  'PARTIALLY RECEIVED': '!',
   'PENDING APPROVAL': '!',
   'DRAFT': '-',
   'INACTIVE': '-',
@@ -132,7 +145,8 @@
   'REACHED REORDER': '!',
   'AT REORDER': '!',
   'BELOW REORDER': '!',
-  'CANCELLED': 'x'
+  'CANCELLED': 'x',
+  'CONVERTED': '+',
 }.get(status_upper, '*') %}
 {% set resolved_size = badge_size_classes.get(size, badge_size_classes.md) %}
 <span class="badge {{ resolved_size }} {{ badge_class }}">
@@ -2084,7 +2098,7 @@ if (typeof window.searchAutosuggest === 'undefined') {
                   <button x-show="!n.read"
                           @click.stop="markNotificationRead(n)"
                           type="button"
-                          class="flex-shrink-0 rounded px-2 py-1 text-[11px] font-medium text-teal-600 hover:bg-teal-50 hover:text-teal-700 dark:text-teal-400 dark:hover:bg-teal-900/20 dark:hover:text-teal-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500/60">
+                          class="flex-shrink-0 rounded px-2 py-1 text-xs font-medium text-teal-600 hover:bg-teal-50 hover:text-teal-700 dark:text-teal-400 dark:hover:bg-teal-900/20 dark:hover:text-teal-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500/60">
                     Mark read
                   </button>
                 </div>

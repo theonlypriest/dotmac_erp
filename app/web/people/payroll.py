@@ -117,13 +117,14 @@ def list_salary_slips(
     request: Request,
     search: str | None = None,
     status: str | None = None,
+    employment_type_id: str | None = None,
     page: int = Query(default=1, ge=1),
     auth: WebAuthContext = Depends(require_hr_access),
     db: Session = Depends(get_db_for_org),
 ):
     """Salary slip list page."""
     return payroll_web_service.list_slips_response(
-        request, auth, db, search, status, page
+        request, auth, db, search, status, employment_type_id, page
     )
 
 
@@ -132,11 +133,14 @@ def export_salary_slips(
     request: Request,
     search: str | None = None,
     status: str | None = None,
+    employment_type_id: str | None = None,
     auth: WebAuthContext = Depends(require_hr_access),
     db: Session = Depends(get_db_for_org),
 ):
     """Export salary slips to CSV."""
-    return payroll_web_service.export_slips_response(request, auth, db, search, status)
+    return payroll_web_service.export_slips_response(
+        request, auth, db, search, status, employment_type_id
+    )
 
 
 @router.get("/slips/new", response_class=HTMLResponse)

@@ -123,8 +123,18 @@ def sync_customers(
     )
     from app.services.settings_spec import SettingDomain, resolve_value
 
-    secret_key = resolve_value(db, SettingDomain.payments, "paystack_secret_key")
-    public_key = resolve_value(db, SettingDomain.payments, "paystack_public_key")
+    secret_key = resolve_value(
+        db,
+        SettingDomain.payments,
+        "paystack_secret_key",
+        organization_id=organization_id,
+    )
+    public_key = resolve_value(
+        db,
+        SettingDomain.payments,
+        "paystack_public_key",
+        organization_id=organization_id,
+    )
     if not secret_key:
         raise RuntimeError(
             "paystack_secret_key is not configured for this organization"

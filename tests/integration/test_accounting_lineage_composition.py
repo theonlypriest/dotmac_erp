@@ -15,7 +15,8 @@ that constructs its own tables proves something about the test, not the deploy.
 Every composed module lineage is an independent ROOT with its own branch label:
 `fi_0001_stored_files` labels `files`, `ac_0001_accounting` labels `accounting`,
 `im_0001_import_runs` labels `imports`, and `nu_0001_numbering` labels
-`numbering`; `tx_0003_result_fingerprint` is the reviewed head of `tax`.
+`numbering`; `pe_0001_people_directory` labels `people`; and
+`tx_0003_result_fingerprint` is the reviewed head of `tax`.
 That is the design — a module owns its history so it can be released and pinned
 without ERP rewriting its graph — and it is why ERP's deploy path has always
 been `alembic upgrade heads`, plural.
@@ -88,6 +89,8 @@ IMPORTS_SCHEMA = "mod_imports"
 IMPORTS_REVISION = "im_0001_import_runs"
 NUMBERING_SCHEMA = "mod_numbering"
 NUMBERING_REVISION = "nu_0001_numbering"
+PEOPLE_SCHEMA = "mod_people"
+PEOPLE_REVISION = "pe_0001_people_directory"
 TAX_SCHEMA = "mod_tax"
 TAX_REVISION = "tx_0003_result_fingerprint"
 IDEMPOTENCY_PROVIDER_REVISION = "20260820_idempotency_ledger"
@@ -381,6 +384,29 @@ def test_the_numbering_lineage_applies_on_only_the_selected_tenant_plane(
     assert len(module.platform_tables) == 4
     assert present == set(module.tables)
     assert not present & set(module.platform_tables)
+
+
+def test_the_people_schema_exists_with_every_declared_table(
+    composed_database: URL,
+) -> None:
+    from dotmac_people.manifest import module
+
+    assert PEOPLE_REVISION in _applied_revisions(composed_database)
+    engine = create_engine(composed_database)
+    try:
+        with engine.connect() as connection:
+            present = set(
+                connection.execute(
+                    text("SELECT tablename FROM pg_tables WHERE schemaname = :schema"),
+                    {"schema": PEOPLE_SCHEMA},
+                ).scalars()
+            )
+    finally:
+        engine.dispose()
+
+    assert module.tables
+    assert not module.platform_tables
+    assert present == set(module.tables)
 
 
 def test_two_concurrent_import_workers_claim_different_partitions(
@@ -932,6 +958,39 @@ def test_every_numbering_table_is_tenant_scoped_and_rls_forced(
     assert all(enabled and forced and not_null for _, enabled, forced, not_null in rows)
 
 
+def test_every_people_table_is_tenant_scoped_and_rls_forced(
+    composed_database: URL,
+) -> None:
+    """People's atomic store cannot contain an unscoped tenant table."""
+    from dotmac_people.manifest import module
+
+    engine = create_engine(composed_database)
+    try:
+        with engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    """
+                    SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity,
+                           a.attnotnull
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    JOIN pg_attribute a ON a.attrelid = c.oid
+                    WHERE n.nspname = :schema
+                      AND c.relkind = 'r'
+                      AND a.attname = 'tenant_id'
+                      AND NOT a.attisdropped
+                    ORDER BY c.relname
+                    """
+                ),
+                {"schema": PEOPLE_SCHEMA},
+            ).all()
+    finally:
+        engine.dispose()
+
+    assert {name for name, _, _, _ in rows} == set(module.tables)
+    assert all(enabled and forced and not_null for _, enabled, forced, not_null in rows)
+
+
 def test_numbering_rls_is_effective_for_the_online_role_across_two_tenants(
     composed_database: URL,
 ) -> None:
@@ -1117,12 +1176,19 @@ def _gate_report():
     from dotmac_files.manifest import module as files_module
     from dotmac_imports.manifest import module as imports_module
     from dotmac_numbering.manifest import module as numbering_module
+    from dotmac_people.manifest import module as people_module
 
     previous = tuple(installed_bindings())
     install_prerequisite_bindings(ASSEMBLY_PREREQUISITE_BINDINGS)
     try:
         return run_gate(
-            (accounting_module, files_module, imports_module, numbering_module),
+            (
+                accounting_module,
+                files_module,
+                imports_module,
+                numbering_module,
+                people_module,
+            ),
             _composed_version_locations(),
             bindings=ASSEMBLY_PREREQUISITE_BINDINGS,
             module_planes=ASSEMBLY_MODULE_PLANES,
@@ -1169,6 +1235,7 @@ def test_the_composed_migration_gate_reports_nothing_against_the_modules() -> No
         "fi_0001_stored_files",
         IMPORTS_REVISION,
         NUMBERING_REVISION,
+        PEOPLE_REVISION,
     }
 
     offending = [
@@ -1177,6 +1244,7 @@ def test_the_composed_migration_gate_reports_nothing_against_the_modules() -> No
         if any(revision in violation for revision in module_revisions)
         or "module 'accounting'" in violation
         or "module 'files'" in violation
+        or "module 'people'" in violation
         or "module 'imports'" in violation
         or "module 'numbering'" in violation
     ]

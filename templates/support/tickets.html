@@ -1,5 +1,5 @@
 {% extends "modules/base_modules.html" %}
-{% from "components/macros.html" import compact_filters, pagination, icon_svg, status_badge %}
+{% from "components/macros.html" import compact_filters, pagination, icon_svg, status_badge, stats_card %}
 
 {% block page_title %}Support Tickets{% endblock %}
 
@@ -71,61 +71,10 @@
 
     {# Stats Cards #}
     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {# Open Tickets #}
-        <div class="card p-5 relative overflow-hidden group hover:shadow-lg transition-shadow">
-            <div class="absolute top-0 right-0 w-24 h-24 -mr-8 -mt-8 rounded-full bg-sky-500/10 dark:bg-sky-400/10 group-hover:scale-110 transition-transform"></div>
-            <div class="flex items-start justify-between relative">
-                <div>
-                    <p class="text-sm font-medium text-slate-500 dark:text-slate-400">Open</p>
-                    <p class="text-3xl font-bold text-sky-600 dark:text-sky-400 mt-1">{{ stats.open | default(0) }}</p>
-                </div>
-                <div class="flex h-12 w-12 items-center justify-center rounded-xl bg-sky-50 text-sky-600 dark:bg-sky-900/30 dark:text-sky-400">
-                    {{ icon_svg("inbox", "h-6 w-6") }}
-                </div>
-            </div>
-        </div>
-
-        {# Urgent #}
-        <div class="card p-5 relative overflow-hidden group hover:shadow-lg transition-shadow">
-            <div class="absolute top-0 right-0 w-24 h-24 -mr-8 -mt-8 rounded-full bg-rose-500/10 dark:bg-rose-400/10 group-hover:scale-110 transition-transform"></div>
-            <div class="flex items-start justify-between relative">
-                <div>
-                    <p class="text-sm font-medium text-slate-500 dark:text-slate-400">Urgent</p>
-                    <p class="text-3xl font-bold text-rose-600 dark:text-rose-400 mt-1">{{ stats.urgent | default(0) }}</p>
-                </div>
-                <div class="flex h-12 w-12 items-center justify-center rounded-xl bg-rose-50 text-rose-600 dark:bg-rose-900/30 dark:text-rose-400">
-                    {{ icon_svg("warning", "h-6 w-6") }}
-                </div>
-            </div>
-        </div>
-
-        {# On Hold #}
-        <div class="card p-5 relative overflow-hidden group hover:shadow-lg transition-shadow">
-            <div class="absolute top-0 right-0 w-24 h-24 -mr-8 -mt-8 rounded-full bg-amber-500/10 dark:bg-amber-400/10 group-hover:scale-110 transition-transform"></div>
-            <div class="flex items-start justify-between relative">
-                <div>
-                    <p class="text-sm font-medium text-slate-500 dark:text-slate-400">On Hold</p>
-                    <p class="text-3xl font-bold text-amber-600 dark:text-amber-400 mt-1">{{ stats.on_hold | default(0) }}</p>
-                </div>
-                <div class="flex h-12 w-12 items-center justify-center rounded-xl bg-amber-50 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400">
-                    {{ icon_svg("pause-circle", "h-6 w-6") }}
-                </div>
-            </div>
-        </div>
-
-        {# Resolved #}
-        <div class="card p-5 relative overflow-hidden group hover:shadow-lg transition-shadow">
-            <div class="absolute top-0 right-0 w-24 h-24 -mr-8 -mt-8 rounded-full bg-emerald-500/10 dark:bg-emerald-400/10 group-hover:scale-110 transition-transform"></div>
-            <div class="flex items-start justify-between relative">
-                <div>
-                    <p class="text-sm font-medium text-slate-500 dark:text-slate-400">Resolved</p>
-                    <p class="text-3xl font-bold text-emerald-600 dark:text-emerald-400 mt-1">{{ stats.resolved | default(0) }}</p>
-                </div>
-                <div class="flex h-12 w-12 items-center justify-center rounded-xl bg-emerald-50 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400">
-                    {{ icon_svg("check-circle", "h-6 w-6") }}
-                </div>
-            </div>
-        </div>
+        {{ stats_card("Open", stats.open | default(0), icon="inbox", color="blue") }}
+        {{ stats_card("Urgent", stats.urgent | default(0), icon="warning", color="rose") }}
+        {{ stats_card("On Hold", stats.on_hold | default(0), icon="pause-circle", color="amber") }}
+        {{ stats_card("Resolved", stats.resolved | default(0), icon="check-circle", color="emerald") }}
     </div>
 
     {# Search and Filters #}

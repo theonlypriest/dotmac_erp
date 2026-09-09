@@ -74,10 +74,16 @@ class PaystackSyncService:
     def _get_paystack_config(self) -> PaystackConfig:
         """Get Paystack configuration from settings."""
         secret_key = resolve_value(
-            self.db, SettingDomain.payments, "paystack_secret_key"
+            self.db,
+            SettingDomain.payments,
+            "paystack_secret_key",
+            organization_id=self.organization_id,
         )
         public_key = resolve_value(
-            self.db, SettingDomain.payments, "paystack_public_key"
+            self.db,
+            SettingDomain.payments,
+            "paystack_public_key",
+            organization_id=self.organization_id,
         )
 
         if not secret_key or not public_key:
@@ -92,10 +98,16 @@ class PaystackSyncService:
     def _get_bank_accounts(self) -> tuple[BankAccount | None, BankAccount | None]:
         """Get the Paystack bank accounts for collections and transfers."""
         collection_id = resolve_value(
-            self.db, SettingDomain.payments, "paystack_collection_bank_account_id"
+            self.db,
+            SettingDomain.payments,
+            "paystack_collection_bank_account_id",
+            organization_id=self.organization_id,
         )
         transfer_id = resolve_value(
-            self.db, SettingDomain.payments, "paystack_transfer_bank_account_id"
+            self.db,
+            SettingDomain.payments,
+            "paystack_transfer_bank_account_id",
+            organization_id=self.organization_id,
         )
 
         collection_account = None

@@ -434,7 +434,36 @@ class TestBuildBeatSchedule:
         )
         # No DB-defined tasks
         assert not any(k.startswith("scheduled_task_") for k in schedule)
+        assert "dotmac-sub-incremental-sync" not in schedule
         mock_session.close.assert_called_once()
+
+    @patch("app.services.scheduler_config.SessionLocal")
+    def test_dotmac_sub_incremental_sync_has_one_db_owned_schedule(
+        self, mock_session_local
+    ):
+        mock_session = MagicMock()
+        mock_session_local.return_value = mock_session
+
+        task_id = uuid.uuid4()
+        mock_task = MagicMock()
+        mock_task.id = task_id
+        mock_task.enabled = True
+        mock_task.schedule_type = ScheduleType.interval
+        mock_task.interval_seconds = 1800
+        mock_task.task_name = "app.tasks.dotmac_sub.run_dotmac_sub_incremental_sync"
+        mock_task.args_json = []
+        mock_task.kwargs_json = {}
+        mock_session.scalars.return_value.all.return_value = [mock_task]
+
+        schedule = build_beat_schedule()
+
+        matching_entries = [
+            entry
+            for entry in schedule.values()
+            if entry["task"] == "app.tasks.dotmac_sub.run_dotmac_sub_incremental_sync"
+        ]
+        assert len(matching_entries) == 1
+        assert f"scheduled_task_{task_id}" in schedule
 
     @patch("app.services.scheduler_config.SessionLocal")
     def test_build_beat_schedule_enabled_only(self, mock_session_local):

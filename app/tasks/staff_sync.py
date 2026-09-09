@@ -16,6 +16,7 @@ from celery import shared_task
 
 from app.db.session_context import session_for_org
 from app.models.people.hr.employee import Employee
+from app.services.dotmac_sub import DotmacSubPermanentSyncError
 from app.services.dotmac_sub import staff_sync
 from app.tasks.dotmac_sub import _resolve_org_id
 
@@ -42,6 +43,11 @@ def sync_employee_staff_account(
                 "Staff sync for employee %s: %s", employee_id, result.get("action")
             )
             return {"success": True, **result}
+    except DotmacSubPermanentSyncError as e:
+        logger.error(
+            "Staff sync failed permanently for employee %s: %s", employee_id, e
+        )
+        return {"success": False, "retryable": False, "error": str(e)}
     except Exception as e:  # noqa: BLE001 — retry transport/API failures
         logger.warning("Staff sync retry for employee %s: %s", employee_id, e)
         raise self.retry(exc=e)

@@ -12,9 +12,11 @@ that makes the positive statement true:
 | `composition_state()` reports absent   | reports the installed version             |
 | `require_composition_ready()` says "not installed" | says "not enabled"          |
 
-One gate-A assertion deliberately SURVIVES unchanged: nothing under `app/`
-imports the package.  Composition is a storage fact; a code-level import would
-be the start of a runtime dependency, and that belongs to a later gate.
+One gate-A assertion survives with a release-metadata seam: nothing under
+`app/` imports the package runtime.  `app.product_assembly` may import the
+declarative `dotmac_accounting.manifest` and nothing else from the package.
+Composition is a storage fact; any other code-level import would be the start
+of a runtime dependency, and that belongs to a later gate.
 
 `test_the_distribution_is_not_pinned` was never an oracle for whether the
 release tag existed — it was an absence guard for gate A, and treating it as a
@@ -50,6 +52,7 @@ from app import accounting_adoption
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 APP_ROOT = REPO_ROOT / "app"
+PRODUCT_ASSEMBLY = APP_ROOT / "product_assembly.py"
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 ALEMBIC_INI = REPO_ROOT / "alembic.ini"
 
@@ -70,6 +73,14 @@ def _imported_modules(path: Path) -> set[str]:
         elif isinstance(node, ast.ImportFrom) and node.module:
             modules.add(node.module)
     return modules
+
+
+def _is_accounting_runtime_import(path: Path, module: str) -> bool:
+    """Only the product assembly may consume the declarative manifest."""
+    package = accounting_adoption.IMPORT_PACKAGE
+    if module != package and not module.startswith(f"{package}."):
+        return False
+    return path != PRODUCT_ASSEMBLY or module != f"{package}.manifest"
 
 
 def test_the_distribution_is_pinned_exactly_from_the_private_source() -> None:
@@ -101,23 +112,35 @@ def test_the_installed_version_is_the_pinned_version() -> None:
 
 
 def test_nothing_under_app_imports_the_module() -> None:
-    """Including the declaration itself.
+    """No runtime import is hidden behind the release-only manifest seam.
 
-    `accounting_adoption.py` describes the composition; importing the package
-    would make ERP depend on it to describe it, which is the coupling the
-    declaration exists to avoid.
+    `accounting_adoption.py` describes the storage composition without importing
+    the package. `product_assembly.py` binds immutable release identity and may
+    therefore import exactly the package manifest, never a model or service.
     """
     offenders = sorted(
         path.relative_to(REPO_ROOT).as_posix()
         for path in APP_ROOT.rglob("*.py")
         if any(
-            module == accounting_adoption.IMPORT_PACKAGE
-            or module.startswith(f"{accounting_adoption.IMPORT_PACKAGE}.")
+            _is_accounting_runtime_import(path, module)
             for module in _imported_modules(path)
         )
     )
     assert not offenders, (
         f"app/ imports {accounting_adoption.IMPORT_PACKAGE}: {offenders}"
+    )
+
+
+def test_accounting_manifest_seam_is_narrow_and_runtime_sensitive() -> None:
+    other_path = APP_ROOT / "services" / "example.py"
+    assert not _is_accounting_runtime_import(
+        PRODUCT_ASSEMBLY, "dotmac_accounting.manifest"
+    )
+    assert _is_accounting_runtime_import(other_path, "dotmac_accounting.manifest")
+    assert _is_accounting_runtime_import(PRODUCT_ASSEMBLY, "dotmac_accounting")
+    assert _is_accounting_runtime_import(PRODUCT_ASSEMBLY, "dotmac_accounting.service")
+    assert _is_accounting_runtime_import(
+        PRODUCT_ASSEMBLY, "dotmac_accounting.manifest.private"
     )
 
 

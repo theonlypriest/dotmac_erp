@@ -145,7 +145,7 @@ docker-migrate: ## Run migrations inside Docker + regenerate schema skill
 	@test -n "$$MIGRATION_DATABASE_URL" || { \
 	  echo "MIGRATION_DATABASE_URL must connect as app_admin"; \
 	  exit 2; }
-	docker compose run --rm --entrypoint "" -e MIGRATION_DATABASE_URL app \
+	docker compose run --rm -e MIGRATION_DATABASE_URL app \
 	  alembic upgrade heads
 	@echo "Regenerating schema skill..."
 	@poetry run python scripts/generate_schema_skill.py

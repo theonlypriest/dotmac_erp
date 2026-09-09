@@ -7,7 +7,8 @@ CSV importers for HR master data and employees.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -18,15 +19,25 @@ from app.models.people.hr import (
     Designation,
     Employee,
     EmployeeStatus,
-    EmploymentType,
     Position,
     PositionAssignment,
     PositionAssignmentType,
 )
 from app.models.person import Person
 from app.services.finance.import_export.base import BaseImporter, FieldMapping
+from app.services.people.hr.employment_types import (
+    EmploymentTypeService,
+    EmploymentTypeView,
+)
+from app.services.people.hr.errors import EmploymentTypeNotFoundError
+from app.services.people.hr.organization_types import EmploymentTypeCreateData
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class _ImportActor:
+    id: UUID
 
 
 def _first_value(row: dict[str, Any], *keys: str) -> str | None:
@@ -223,11 +234,11 @@ class DesignationImporter(BaseImporter[Designation]):
         )
 
 
-class EmploymentTypeImporter(BaseImporter[EmploymentType]):
+class EmploymentTypeImporter(BaseImporter[EmploymentTypeView]):
     """Importer for employment types."""
 
     entity_name = "Employment Type"
-    model_class = EmploymentType
+    model_class = EmploymentTypeView
 
     def get_field_mappings(self) -> list[FieldMapping]:
         return [
@@ -242,18 +253,15 @@ class EmploymentTypeImporter(BaseImporter[EmploymentType]):
     def get_unique_key(self, row: dict[str, Any]) -> str:
         return _first_value(row, "Employment Type Code") or "unknown"
 
-    def check_duplicate(self, row: dict[str, Any]) -> EmploymentType | None:
+    def check_duplicate(self, row: dict[str, Any]) -> EmploymentTypeView | None:
         code = _first_value(row, "Employment Type Code")
         if not code:
             return None
-        return self.db.scalar(
-            select(EmploymentType).where(
-                EmploymentType.organization_id == self.config.organization_id,
-                EmploymentType.type_code == code,
-            )
+        return EmploymentTypeService(self.db, self.config.organization_id).get_by_code(
+            code
         )
 
-    def create_entity(self, row: dict[str, Any]) -> EmploymentType:
+    def create_entity(self, row: dict[str, Any]) -> EmploymentTypeView:
         type_code = _first_value(row, "type_code")
         type_name = _first_value(row, "type_name")
 
@@ -262,16 +270,31 @@ class EmploymentTypeImporter(BaseImporter[EmploymentType]):
         if not type_name:
             raise ValueError("Employment Type Name is required")
 
-        return EmploymentType(
-            employment_type_id=uuid4(),
-            organization_id=self.config.organization_id,
-            type_code=type_code[:20],
-            type_name=type_name[:100],
-            description=row.get("description"),
-            is_active=row.get("is_active")
-            if row.get("is_active") is not None
-            else True,
+        return EmploymentTypeService(
+            self.db,
+            self.config.organization_id,
+            _ImportActor(self.config.user_id),
+        ).create_employment_type(
+            EmploymentTypeCreateData(
+                type_code=type_code[:20],
+                type_name=type_name[:100],
+                description=row.get("description"),
+                is_active=(
+                    cast(bool, row.get("is_active"))
+                    if row.get("is_active") is not None
+                    else True
+                ),
+            )
         )
+
+    def _commit_batch(self, batch: list[EmploymentTypeView]) -> None:
+        """Record owner-created rows without adding immutable views to the ORM.
+
+        ``EmploymentTypeService.create_employment_type`` owns the write and flushes
+        each row. The base importer still batches result accounting, so this seam
+        deliberately records those already-flushed IDs and performs no second write.
+        """
+        self.result.imported_ids.extend(row.employment_type_id for row in batch)
 
 
 class EmployeeImporter(BaseImporter[Employee]):
@@ -395,16 +418,14 @@ class EmployeeImporter(BaseImporter[Employee]):
         cache_key = f"employment_type:{code}"
         if cache_key in self._id_cache:
             return self._id_cache[cache_key]
-        emp_type = self.db.scalar(
-            select(EmploymentType).where(
-                EmploymentType.organization_id == self.config.organization_id,
-                EmploymentType.type_code == code,
-            )
-        )
-        if emp_type:
-            self._id_cache[cache_key] = emp_type.employment_type_id
-            return emp_type.employment_type_id
-        return None
+        try:
+            emp_type = EmploymentTypeService(
+                self.db, self.config.organization_id
+            ).require_active_by_code(code)
+        except EmploymentTypeNotFoundError:
+            return None
+        self._id_cache[cache_key] = emp_type.employment_type_id
+        return emp_type.employment_type_id
 
     def _resolve_employee_id(self, code: str | None) -> UUID | None:
         if not code:

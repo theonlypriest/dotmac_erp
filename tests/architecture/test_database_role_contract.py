@@ -23,6 +23,7 @@ MIGRATION = REPO_ROOT / "alembic" / "versions" / "20260814_database_roles.py"
 RUNTIME_CONTRACT = REPO_ROOT / "app" / "migration_database_roles.py"
 ALEMBIC_ENV = REPO_ROOT / "alembic" / "env.py"
 DEPLOY = REPO_ROOT / "scripts" / "deploy.sh"
+RUNTIME_ADMISSION_SCRIPT = REPO_ROOT / "scripts" / "verify_runtime_admission.py"
 CI = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 HARDENED_CI = REPO_ROOT / ".github" / "workflows" / "release-hardened.yml"
 MAKEFILE = REPO_ROOT / "Makefile"
@@ -103,13 +104,104 @@ def test_the_migration_states_the_same_contract() -> None:
 
 
 def test_bootstrap_and_deploy_reuse_the_runtime_verifier() -> None:
+    """Deploy delegates to the shared contracts; it never restates one.
+
+    Both verifiers are pinned, not just the first: dropping either step from
+    `scripts/deploy.sh` fails here. They answer DIFFERENT questions on
+    DIFFERENT credentials — `--verify-only` asks whether `app_admin` may run
+    the DDL, and the admission check asks whether the connection the
+    application will serve requests on is the canonical runtime identity for
+    the modules that are actually active. Neither substitutes for the other,
+    so neither may be silently removed.
+    """
     bootstrap = SCRIPT.read_text(encoding="utf-8")
     deploy = DEPLOY.read_text(encoding="utf-8")
+    admission = RUNTIME_ADMISSION_SCRIPT.read_text(encoding="utf-8")
 
     assert "from app.migration_database_roles import" in bootstrap
     assert "MIGRATION_OWNERSHIP_SQL" in bootstrap
     assert "--verify-only" in deploy
     assert "REQUIRED =" not in deploy
+
+    assert "from app.runtime_admission import" in admission
+    assert "runtime_admission_violations" in admission
+    assert "scripts/verify_runtime_admission.py" in deploy
+    assert "RUNTIME_ROLE =" not in deploy
+
+
+def compose_run_invocation(deploy: str, command: str) -> str:
+    """The `docker compose run ...` that actually EXECUTES `command`.
+
+    Anchored on the executed command and then walked BACKWARDS to the compose
+    invocation that carries it, rather than splitting on the first textual
+    mention of a script name. `scripts/deploy.sh` explains each step in a
+    comment above it, so a name-first split measures the prose and reports on
+    whichever command happens to precede it — which is how a check like this
+    silently starts asserting nothing.
+    """
+    index = deploy.index(command)
+    start = deploy.rindex("docker compose run", 0, index)
+    return deploy[start : index + len(command)]
+
+
+def test_the_two_deploy_verifiers_use_different_credentials() -> None:
+    """The one deliberate asymmetry in `scripts/deploy.sh`, pinned.
+
+    Every other one-off in that script is handed `-e MIGRATION_DATABASE_URL`.
+    The admission step must NOT be: it exists to observe the runtime
+    connection, and `app_admin` is BYPASSRLS by contract, so re-verifying it
+    there would certify a role that can read past every tenant policy.
+    """
+    deploy = DEPLOY.read_text(encoding="utf-8")
+
+    admission = compose_run_invocation(
+        deploy, "python scripts/verify_runtime_admission.py"
+    )
+    assert "-e MIGRATION_DATABASE_URL" not in admission, (
+        "the runtime admission step was handed the migration credential"
+    )
+
+    for executor_command in (
+        "python scripts/bootstrap_database_roles.py --verify-only",
+        "alembic upgrade heads\n",
+    ):
+        invocation = compose_run_invocation(deploy, executor_command)
+        assert "-e MIGRATION_DATABASE_URL" in invocation, executor_command
+
+
+def test_the_credential_asymmetry_detector_is_sensitive() -> None:
+    """Sensitivity proof (ADR-0018): the split above must be able to fail.
+
+    Planted defect — hand the admission step the migration credential — and the
+    helper must report it. A detector anchored on a comment would pass this.
+    """
+    deploy = DEPLOY.read_text(encoding="utf-8")
+    tampered = deploy.replace(
+        "docker compose run --rm app \\\n    python "
+        "scripts/verify_runtime_admission.py",
+        "docker compose run --rm -e MIGRATION_DATABASE_URL app \\\n    python "
+        "scripts/verify_runtime_admission.py",
+        1,
+    )
+    assert tampered != deploy, "the tamper target moved; update this proof"
+    assert "-e MIGRATION_DATABASE_URL" in compose_run_invocation(
+        tampered, "python scripts/verify_runtime_admission.py"
+    )
+
+
+def test_the_runtime_role_contract_is_stated_once_for_both_verifiers() -> None:
+    """`app_user` is `(NOBYPASSRLS, NOSUPERUSER)` in exactly one place.
+
+    The admission check refuses a runtime role that is SUPERUSER or BYPASSRLS,
+    which is the same contract `ROLE_CONTRACT` states. It must not restate the
+    pair — two copies is how a repaired bootstrap and a refusing admission
+    check end up disagreeing about what correct looks like.
+    """
+    from app.migration_database_roles import ROLE_CONTRACT
+    from app.runtime_admission import RUNTIME_ROLE
+
+    assert RUNTIME_ROLE in ROLE_CONTRACT
+    assert ROLE_CONTRACT[RUNTIME_ROLE] == EXPECTED["app_user"] == (False, False)
 
 
 def test_alembic_requires_the_dedicated_migration_url_and_exact_executor() -> None:
@@ -143,9 +235,9 @@ def test_operator_migration_entrypoints_do_not_reuse_the_running_app() -> None:
     makefile = MAKEFILE.read_text(encoding="utf-8")
 
     assert "-e MIGRATION_DATABASE_URL app" in deploy
-    assert 'docker compose run --rm --entrypoint "" -e MIGRATION_DATABASE_URL app' in (
-        makefile
-    )
+    assert "docker compose run --rm -e MIGRATION_DATABASE_URL app" in makefile
+    assert "--entrypoint" not in deploy
+    assert "--entrypoint" not in makefile
     assert "docker exec dotmac_erp_app alembic" not in makefile
 
 

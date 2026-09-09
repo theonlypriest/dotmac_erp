@@ -18,7 +18,12 @@ centrally, and reports every untracked Python source as an error.
 
 Remeasured on 2026-08-25 in the direct-CRM retirement change with the pinned
 schema-9 engine. The exact file inventory below and the profile baselines are
-lowered together; nine conserved findings remain unchanged.
+lowered together; nine conserved findings remain.
+
+Reviewed again on 2026-08-29 for PR #416 after connector failure coverage
+changed the source files containing three test-only conserved symbols. Their
+fingerprints are re-declared below; no baseline or conserved finding was added
+or removed.
 
 | Category | Baseline |
 | --- | ---: |
@@ -101,9 +106,9 @@ revision, so its two entries also preserve that stronger dead-code signal.
 | --- | --- | --- | --- |
 | `app/services/coach/insight_engine.py` | `InsightEngine` | `delivery_retry` | `f7f150d9fa6c5e2d3675f1d041c8b2bcc65068b1924504f577f6205207108ed0` |
 | `app/services/coach/insight_engine.py` | `InsightEngine` | `outbound_transport` | `f7f150d9fa6c5e2d3675f1d041c8b2bcc65068b1924504f577f6205207108ed0` |
-| `tests/services/test_dotmac_sub_incremental_sync.py` | `test_customer_feeds_forward_their_watermarks` | `sync_checkpoint` | `c60a65c1214a478fd7909fe746b7c3b6d607b4d074ae09ceddaa9cbd1e301c41` |
-| `tests/services/test_dotmac_sub_sync.py` | `test_verify_webhook_signature` | `webhook_surface` | `7a87e6ab27b39d6e01e49ccac47818926bce03ed12bd764665023a16a583c57c` |
-| `tests/services/test_dotmac_sub_sync.py` | `test_verify_webhook_signature_unconfigured` | `webhook_surface` | `7a87e6ab27b39d6e01e49ccac47818926bce03ed12bd764665023a16a583c57c` |
+| `tests/services/test_dotmac_sub_incremental_sync.py` | `test_customer_feeds_forward_their_watermarks` | `sync_checkpoint` | `ced5e1214b2e8731e79f877ec620f2d3333f80244fc07284dabdf7aa91b99ef3` |
+| `tests/services/test_dotmac_sub_sync.py` | `test_verify_webhook_signature` | `webhook_surface` | `18b2cccff0f9d19c688adbfe3714dfbcfb494ccf55fb00fea58047b2c0babd3d` |
+| `tests/services/test_dotmac_sub_sync.py` | `test_verify_webhook_signature_unconfigured` | `webhook_surface` | `18b2cccff0f9d19c688adbfe3714dfbcfb494ccf55fb00fea58047b2c0babd3d` |
 | `tests/services/test_hook_registry.py` | `TestHookRegistry` | `webhook_surface` | `eec0ca322ca2be69c1b0860550a85bf268ffef1ef7783869e0af2b9adabdc8f7` |
 | `tests/services/test_mono_sync.py` | `test_verify_webhook_rejects_empty_secrets` | `webhook_surface` | `3db300e89674052e47d62060f10e90da27fa084ee070ba39df0a9a577d6bf628` |
 | `tests/tasks/test_hooks_tasks.py` | `TestExecuteAsyncHook` | `delivery_retry` | `ced43bd99de9a2af6ac3d9d4be8e3bb3a254f17d4b7435bb8eedb1c29a399ff6` |

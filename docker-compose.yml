@@ -1,16 +1,68 @@
 services:
+  # ─────────────────────────────────────────────────────────────────────────
+  # APP_IMAGE — an immutable digest, and no default.
+  #
+  # These three services used to read
+  # `ghcr.io/michaelayoade/dotmac_erp:${ERP_IMAGE_TAG:-latest}`. Two defects
+  # sat in that one line. The `:-latest` fallback meant a bare
+  # `docker compose up -d` by anyone not using scripts/deploy.sh silently
+  # pulled a floating tag. And even on the deploy path, ERP_IMAGE_TAG was
+  # pinned to `sha-$(git rev-parse --short=7 HEAD)` — reproducible-LOOKING,
+  # but still a mutable registry pointer, and never compared against the bytes
+  # CI tested. ERP's publish lane had meanwhile been resolving the tested
+  # image's real OCI digest (`imagetools inspect --raw | sha256sum`) and
+  # recording it in image-release.json and deploy/product.toml. Production
+  # consumed the tag while the pipeline verified the digest.
+  #
+  # `${APP_IMAGE:?...}` has NO default on purpose. An unset value now refuses
+  # to start, loudly, instead of resolving to something mutable — the failure
+  # mode a default exists to avoid is exactly the failure mode a default
+  # caused here. scripts/deploy.sh resolves APP_IMAGE from
+  # deploy/rendered/docker-compose.yml through scripts/resolve_deploy_image.sh,
+  # which refuses anything that is not `sha256:<64 hex>`, and writes it into
+  # .env so a later bare `docker compose up -d` reuses the same pinned release.
+  # ─────────────────────────────────────────────────────────────────────────
   app:
-    image: ghcr.io/michaelayoade/dotmac_erp:${ERP_IMAGE_TAG:-latest}
+    image: ${APP_IMAGE:?APP_IMAGE must be set to an immutable ghcr.io/michaelayoade/dotmac_erp@sha256:<digest>; scripts/deploy.sh writes it}
     platform: linux/amd64
     container_name: dotmac_erp_app
     restart: unless-stopped
+    # LOOPBACK ONLY, one entry per address family, long syntax.
+    #
+    # `- "8003:8002"` published on 0.0.0.0 AND [::] simultaneously: Docker
+    # spawns one docker-proxy per family for a short-form publish. That put
+    # plaintext HTTP for this app on a routable address in both families,
+    # bypassing the nginx TLS vhost in front of it — and it was actively
+    # scanned (Shodan, Censys). The only legitimate consumer is nginx on this
+    # host, via `upstream dotmac_erp { server 127.0.0.1:8003; }`; a 24h access
+    # log sample found zero non-loopback client IPs across 21,587 requests.
+    #
+    # Naming a host_ip is what fixes it. The IPv6 half CANNOT be fixed with a
+    # firewall rule: with an IPv4-only docker network there is no IPv6 DNAT, so
+    # an inbound v6 connection is accepted by docker-proxy as a local process
+    # and traverses INPUT, while DOCKER-USER is only ever jumped from FORWARD.
+    # Every `ip6tables DOCKER-USER` rule against a published port sits at zero
+    # packets forever. Binding the listener is the fix, not filtering it.
+    #
+    # Both families are named explicitly rather than left implicit, so the
+    # binding is reviewable and a future short form is an obvious regression.
+    # Changing this requires `docker compose up -d app` to RECREATE the
+    # container; `docker compose restart` re-runs the existing container object
+    # with its existing HostConfig.PortBindings and has no effect.
     ports:
-    - "8003:8002"
+    - target: 8002
+      published: "8003"
+      host_ip: "127.0.0.1"
+      protocol: tcp
+    - target: 8002
+      published: "8003"
+      host_ip: "::1"
+      protocol: tcp
     env_file:
     - .env
     environment:
       APP_URL: https://erp.dotmac.io
-      APP_VERSION: ${APP_VERSION:-1.33.1}
+      APP_VERSION: ${APP_VERSION:-1.33.4}
       DOTMAC_DEV_MODE: ${DOTMAC_DEV_MODE:?Set DOTMAC_DEV_MODE explicitly}
       BANKING_AUTO_MATCH_ENABLED: ${BANKING_AUTO_MATCH_ENABLED:-false}
       DEFAULT_ORGANIZATION_ID: 00000000-0000-0000-0000-000000000001
@@ -33,70 +85,65 @@ services:
     depends_on:
       redis:
         condition: service_started
+    # ONLY the named log volume. The four checkout bind mounts that used to sit
+    # here (./static, ./templates, ./license, ./gunicorn.conf.py) meant the
+    # image digest did NOT identify the runtime: the host side is a mutable git
+    # worktree, so `git checkout <ref>` changed what production served with no
+    # image change, no new digest, and for static assets no container recreate.
+    # A digest-bound deployment record would have been precise and wrong, which
+    # is worse than an obviously loose one because it invites trust it has not
+    # earned. Measured in
+    # docs/inventories/2026-08-30-erp-production-infrastructure-preflight.md D2.
+    #
+    # All four now come from the image, which is built from the same commit:
+    #   static/            Dockerfile `COPY static ./static`, then the compiled
+    #                      stylesheet from the css-builder stage overwrites
+    #                      static/css/app.css. The CI css-drift job proves the
+    #                      committed artifact equals a fresh build, which is
+    #                      what makes dropping this mount behaviour-preserving
+    #                      rather than merely tidy.
+    #   templates/         Dockerfile `COPY templates ./templates`
+    #   gunicorn.conf.py   Dockerfile `COPY gunicorn.conf.py`
+    #   license/           Dockerfile `COPY license ./license` (added with this
+    #                      change; the directory was previously supplied ONLY by
+    #                      the mount). A real licence is deployment material and
+    #                      must arrive as a declared material path, never from
+    #                      the source checkout.
     volumes:
     - dotmac_logs:/var/log/dotmac
-    - ./static:/app/static:ro
-    - ./templates:/app/templates:ro
-    - ./license:/app/license:ro
-    - ./gunicorn.conf.py:/app/gunicorn.conf.py:ro
-    - ./scripts/entrypoint-monitoring.sh:/app/entrypoint-monitoring.sh:ro
     healthcheck:
       test:
       - CMD
       - python
       - -c
-      - import urllib.request; urllib.request.urlopen('http://localhost:8002/health')
+      - import urllib.request; urllib.request.urlopen('http://localhost:8002/health/ready')
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
-    entrypoint:
-    - /app/entrypoint-monitoring.sh
     command:
     - gunicorn
     - -c
     - gunicorn.conf.py
     - app.main:app
-  app-dev:
-    build: .
-    platform: linux/amd64
-    container_name: dotmac_erp_app_dev
-    restart: unless-stopped
-    profiles:
-    - dev
-    ports:
-    - 8002:8002
-    env_file:
-    - .env
-    environment:
-      APP_URL: https://erp.dotmac.io
-      DOTMAC_DEV_MODE: 'true'
-      BANKING_AUTO_MATCH_ENABLED: ${BANKING_AUTO_MATCH_ENABLED:-false}
-      DATABASE_URL: ${DATABASE_URL}
-      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
-      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
-      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/1
-      OPENBAO_ADDR: ${OPENBAO_ADDR}
-      OPENBAO_TOKEN: ${OPENBAO_TOKEN:-devtoken}
-      OPENBAO_ALLOW_INSECURE: 'true'
-      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL}
-      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
-      S3_SECRET_KEY: ${S3_SECRET_KEY}
-      S3_BUCKET_NAME: ${S3_BUCKET_NAME:-dotmac-erp}
-    depends_on:
-      redis:
-        condition: service_started
-    volumes:
-    - .:/app
-    command:
-    - uvicorn
-    - app.main:app
-    - --host
-    - 0.0.0.0
-    - --port
-    - '8002'
+  # `app-dev` REMOVED. It was a latent parallel writer that a compose profile
+  # was the only thing holding back:
+  #   - env_file .env and DATABASE_URL: ${DATABASE_URL} -- the PRODUCTION database;
+  #   - volumes `- .:/app` -- the whole checkout mounted over the application;
+  #   - ports `8002:8002` in SHORT syntax, so Docker publishes on 0.0.0.0 AND
+  #     [::], and DOCKER-USER has no rule for 8002 (it drops 8003 and 8010);
+  #   - build: context: . -- an in-place host image build, bypassing CI, the
+  #     registry and every provenance check;
+  #   - restart: unless-stopped, and DOTMAC_DEV_MODE=true.
+  # `scripts/deploy.sh` guarded against it running, but ONLY in
+  # --people-employment-type-activation mode; an ordinary deploy did not.
+  # Removing the service also removes the only remaining `build:` stanza, which
+  # closes the in-place host-build path outright.
+  #
+  # Local development uses the same image the tests and production use.
+
   worker:
-    image: ghcr.io/michaelayoade/dotmac_erp:${ERP_IMAGE_TAG:-latest}
+    image: ${APP_IMAGE:?APP_IMAGE must be set to an immutable ghcr.io/michaelayoade/dotmac_erp@sha256:<digest>; scripts/deploy.sh writes it}
     platform: linux/amd64
     container_name: dotmac_erp_worker
     restart: unless-stopped
@@ -118,10 +165,6 @@ services:
     depends_on:
       redis:
         condition: service_started
-    volumes:
-    - ./scripts/entrypoint-monitoring.sh:/app/entrypoint-monitoring.sh:ro
-    entrypoint:
-    - /app/entrypoint-monitoring.sh
     command:
     - celery
     - -A
@@ -130,7 +173,7 @@ services:
     - -l
     - info
   beat:
-    image: ghcr.io/michaelayoade/dotmac_erp:${ERP_IMAGE_TAG:-latest}
+    image: ${APP_IMAGE:?APP_IMAGE must be set to an immutable ghcr.io/michaelayoade/dotmac_erp@sha256:<digest>; scripts/deploy.sh writes it}
     platform: linux/amd64
     container_name: dotmac_erp_beat
     restart: unless-stopped
@@ -152,10 +195,6 @@ services:
     depends_on:
       redis:
         condition: service_started
-    volumes:
-    - ./scripts/entrypoint-monitoring.sh:/app/entrypoint-monitoring.sh:ro
-    entrypoint:
-    - /app/entrypoint-monitoring.sh
     command:
     - celery
     - -A
@@ -239,6 +278,11 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+# The top-level `secrets:` block is gone with `app-dev`. Its only consumer was
+# that service's `build:`, and the image is built by CI with an explicit
+# `--secret id=forgejo_token`, never through Compose. The Dockerfile still
+# declares the BuildKit secret it needs; nothing here has to.
 
 volumes:
   dotmac_erp_db_data: null

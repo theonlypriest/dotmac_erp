@@ -5,9 +5,12 @@ Provides view-focused data and operations for HR web routes.
 
 from __future__ import annotations
 
+import csv
 import logging
+from collections.abc import Callable
 from datetime import date, datetime, timezone
 from html import escape
+from io import StringIO
 from urllib.parse import urlencode
 
 try:
@@ -20,7 +23,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import BackgroundTasks, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
@@ -38,7 +41,6 @@ from app.models.people.hr import (
     Employee,
     EmployeeGrade,
     EmployeeStatus,
-    EmploymentType,
     Position,
     PositionAssignment,
     PositionAssignmentType,
@@ -70,6 +72,10 @@ from app.services.people.hr import (
 )
 from app.services.people.hr.employee_filter_engine import (
     parse_employee_filter_payload_json,
+)
+from app.services.people.hr.employment_types import (
+    EmploymentTypeService,
+    EmploymentTypeView,
 )
 from app.services.people.hr.org_resolver import OrgResolver
 from app.services.people.hr.offboarding import (
@@ -138,6 +144,53 @@ class HRWebService:
     """Service for HR web views."""
 
     FINAL_PAYROLL_EDITOR_ROLES = frozenset({"admin", "hr_director", "hr_manager"})
+
+    EMPLOYEE_EXPORT_FIELDS: dict[
+        str, tuple[str, Callable[[Employee], object] | None]
+    ] = {
+        "employee_code": ("Employee Code", lambda emp: emp.employee_code),
+        "full_name": ("Full Name", lambda emp: emp.person.name if emp.person else ""),
+        "work_email": (
+            "Work Email",
+            lambda emp: emp.person.email if emp.person else "",
+        ),
+        "work_phone": (
+            "Work Phone",
+            lambda emp: emp.person.phone if emp.person else "",
+        ),
+        "personal_email": ("Personal Email", lambda emp: emp.personal_email),
+        "personal_phone": ("Personal Phone", lambda emp: emp.personal_phone),
+        "department": (
+            "Department",
+            lambda emp: emp.department.department_name if emp.department else "",
+        ),
+        "designation": (
+            "Designation",
+            lambda emp: emp.designation.designation_name if emp.designation else "",
+        ),
+        "employment_type": (
+            "Employment Type",
+            None,
+        ),
+        "status": ("Status", lambda emp: emp.status.value if emp.status else ""),
+        "date_of_joining": ("Date of Joining", lambda emp: emp.date_of_joining),
+        "date_of_leaving": ("Date of Leaving", lambda emp: emp.date_of_leaving),
+        "probation_end_date": (
+            "Probation End Date",
+            lambda emp: emp.probation_end_date,
+        ),
+        "confirmation_date": ("Confirmation Date", lambda emp: emp.confirmation_date),
+    }
+    DEFAULT_EMPLOYEE_EXPORT_FIELDS = (
+        "employee_code",
+        "full_name",
+        "work_email",
+        "department",
+        "designation",
+        "employment_type",
+        "status",
+        "date_of_joining",
+    )
 
     # =========================================================================
     # Employees
@@ -535,29 +588,48 @@ class HRWebService:
 
         # Parse status filter
         status_filter = None
+        status_filters = None
         archive_only = False
         if status:
             status_value = status.strip().lower()
             if status_value in {"archive", "exit_archive"}:
                 archive_only = True
+            elif status_value == "inactive":
+                status_filters = [
+                    EmployeeStatus.SUSPENDED,
+                    EmployeeStatus.RESIGNED,
+                    EmployeeStatus.TERMINATED,
+                    EmployeeStatus.RETIRED,
+                ]
             else:
                 try:
                     status_filter = EmployeeStatus(status.upper())
                 except ValueError:
                     pass
 
+        leaving_from = self._parse_date(date_of_leaving_from or "")
+        leaving_to = self._parse_date(date_of_leaving_to or "")
+        has_exit_date_filter = bool(leaving_from or leaving_to)
+        show_exit_date = status_filter == EmployeeStatus.RESIGNED
+        include_exit_history = archive_only or show_exit_date or has_exit_date_filter
+
         employee_filters = EmployeeFilters(
             search=search,
             status=status_filter,
-            include_archived=archive_only or status_filter == EmployeeStatus.RESIGNED,
+            statuses=status_filters,
+            include_archived=(include_exit_history or status_filters is not None),
             archive_only=archive_only,
-            include_deleted=archive_only or status_filter == EmployeeStatus.TERMINATED,
+            include_deleted=(
+                include_exit_history
+                or status_filters is not None
+                or status_filter == EmployeeStatus.TERMINATED
+            ),
             department_id=coerce_uuid(department_id) if department_id else None,
             designation_id=coerce_uuid(designation_id) if designation_id else None,
             date_of_joining_from=self._parse_date(date_of_joining_from or ""),
             date_of_joining_to=self._parse_date(date_of_joining_to or ""),
-            date_of_leaving_from=self._parse_date(date_of_leaving_from or ""),
-            date_of_leaving_to=self._parse_date(date_of_leaving_to or ""),
+            date_of_leaving_from=leaving_from,
+            date_of_leaving_to=leaving_to,
         )
         pagination = PaginationParams.from_page(page, page_size)
         try:
@@ -587,11 +659,7 @@ class HRWebService:
         )
         designations = desig_result.items
 
-        employment_type_result = org_svc.list_employment_types(
-            EmploymentTypeFilters(is_active=True),
-            PaginationParams(limit=DROPDOWN_LIMIT),
-        )
-        employment_types = employment_type_result.items
+        employment_types = self._list_employee_employment_types(db, org_id)
 
         location_result = org_svc.list_locations(
             is_active=True,
@@ -633,6 +701,7 @@ class HRWebService:
                     "department_name": dept.department_name if dept else "",
                     "designation_name": desig.designation_name if desig else "",
                     "date_of_joining": emp.date_of_joining,
+                    "date_of_leaving": emp.date_of_leaving,
                     "status": status_value,
                     "status_class": self._status_class(emp.status),
                 }
@@ -700,6 +769,7 @@ class HRWebService:
             "date_of_joining_to": date_of_joining_to or "",
             "date_of_leaving_from": date_of_leaving_from or "",
             "date_of_leaving_to": date_of_leaving_to or "",
+            "show_exit_date": show_exit_date,
             "filters_json": filters_json or "",
             "page": page,
             "total_pages": result.total_pages,
@@ -711,12 +781,132 @@ class HRWebService:
             "success": success,
             "error": error,
             "active_filters": active_filters,
+            "employee_export_fields": [
+                {"key": key, "label": label}
+                for key, (label, _) in self.EMPLOYEE_EXPORT_FIELDS.items()
+            ],
+            "default_employee_export_fields": self.DEFAULT_EMPLOYEE_EXPORT_FIELDS,
         }
 
         return templates.TemplateResponse(
             request,
             "people/hr/employees.html",
             context,
+        )
+
+    @staticmethod
+    def _csv_safe_cell(value: object) -> str:
+        """Prevent spreadsheet applications from evaluating exported values."""
+        if value is None:
+            return ""
+        text = str(value)
+        return f"'{text}" if text.startswith(("=", "+", "-", "@")) else text
+
+    def export_employees_csv_response(
+        self,
+        *,
+        auth: WebAuthContext,
+        db: Session,
+        fields: list[str],
+        status: str | None = None,
+        department_id: str | None = None,
+        designation_id: str | None = None,
+        date_of_joining_from: str | None = None,
+        date_of_joining_to: str | None = None,
+        include_archived: bool = False,
+    ) -> Response:
+        """Build a CSV from explicitly selected, allowlisted employee fields."""
+        selected_fields = [
+            field for field in fields if field in self.EMPLOYEE_EXPORT_FIELDS
+        ]
+        if not selected_fields:
+            raise HTTPException(
+                status_code=422, detail="Select at least one export field"
+            )
+
+        status_filter = None
+        status_filters = None
+        if status:
+            if status.strip().lower() == "inactive":
+                status_filters = [
+                    EmployeeStatus.SUSPENDED,
+                    EmployeeStatus.RESIGNED,
+                    EmployeeStatus.TERMINATED,
+                    EmployeeStatus.RETIRED,
+                ]
+            else:
+                try:
+                    status_filter = EmployeeStatus(status.upper())
+                except ValueError as exc:
+                    raise HTTPException(
+                        status_code=422, detail="Invalid employee status"
+                    ) from exc
+
+        org_id = coerce_uuid(auth.organization_id)
+        filters = EmployeeFilters(
+            status=status_filter,
+            statuses=status_filters,
+            include_archived=(
+                include_archived
+                or status_filters is not None
+                or status_filter == EmployeeStatus.RESIGNED
+            ),
+            include_deleted=(
+                include_archived
+                or status_filters is not None
+                or status_filter == EmployeeStatus.TERMINATED
+            ),
+            department_id=coerce_uuid(department_id) if department_id else None,
+            designation_id=coerce_uuid(designation_id) if designation_id else None,
+            date_of_joining_from=self._parse_date(date_of_joining_from or ""),
+            date_of_joining_to=self._parse_date(date_of_joining_to or ""),
+        )
+        employees = (
+            EmployeeService(db, org_id)
+            .list_employees(
+                filters,
+                PaginationParams(limit=100_000),
+                eager_load=True,
+            )
+            .items
+        )
+        employment_type_names = (
+            {
+                row.employment_type_id: row.type_name
+                for row in EmploymentTypeService(db, org_id).iter_all(active=None)
+            }
+            if "employment_type" in selected_fields
+            else {}
+        )
+
+        def _field_value(field: str, employee: Employee) -> object:
+            _, extractor = self.EMPLOYEE_EXPORT_FIELDS[field]
+            if extractor is not None:
+                return extractor(employee)
+            if field != "employment_type":
+                raise RuntimeError(f"missing employee export extractor: {field}")
+            if employee.employment_type_id is None:
+                return ""
+            return employment_type_names.get(employee.employment_type_id, "")
+
+        output = StringIO()
+        writer = csv.writer(output)
+        writer.writerow(
+            [self.EMPLOYEE_EXPORT_FIELDS[field][0] for field in selected_fields]
+        )
+        for employee in employees:
+            writer.writerow(
+                [
+                    self._csv_safe_cell(_field_value(field, employee))
+                    for field in selected_fields
+                ]
+            )
+
+        filename = f"employees_{date.today():%Y%m%d}.csv"
+        return Response(
+            content=output.getvalue(),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
     def employee_stats_response(
@@ -1699,7 +1889,6 @@ class HRWebService:
             "employee_number",
             "department_id",
             "designation_id",
-            "employment_type_id",
             "grade_id",
             "expense_approver_id",
             "cost_center_id",
@@ -1727,6 +1916,8 @@ class HRWebService:
             provided_fields.update({"dotmac_sub_access_enabled", "dotmac_sub_roles"})
         if "reports_to_id" in form:
             provided_fields.add("reports_to_id")
+        if "employment_type_id" in form:
+            provided_fields.add("employment_type_id")
 
         data = EmployeeUpdateData(
             employee_number=employee_code if employee_code else None,
@@ -2082,7 +2273,7 @@ class HRWebService:
         """Update final payroll settings for an exited employee."""
         org_id = coerce_uuid(auth.organization_id)
         svc = EmployeeService(db, org_id)
-        employee = svc.get_employee(employee_id)
+        employee = svc.get_employee(employee_id, include_deleted=True)
 
         if not self._can_manage_final_payroll(auth):
             context = self._employee_detail_context(request, auth, db, employee)
@@ -2122,17 +2313,13 @@ class HRWebService:
 
         if eligible_for_final_payroll and cutoff_date is None:
             cutoff_date = employee.date_of_leaving
+        elif not eligible_for_final_payroll:
+            cutoff_date = None
 
-        svc.update_employee(
+        svc.update_final_payroll_settings(
             employee_id,
-            EmployeeUpdateData(
-                eligible_for_final_payroll=eligible_for_final_payroll,
-                final_payroll_cutoff_date=cutoff_date,
-                provided_fields={
-                    "eligible_for_final_payroll",
-                    "final_payroll_cutoff_date",
-                },
-            ),
+            eligible_for_final_payroll=eligible_for_final_payroll,
+            final_payroll_cutoff_date=cutoff_date,
         )
         db.commit()
         return RedirectResponse(
@@ -2238,7 +2425,9 @@ class HRWebService:
         )
         grade = db.get(EmployeeGrade, employee.grade_id) if employee.grade_id else None
         emp_type = (
-            db.get(EmploymentType, employee.employment_type_id)
+            EmploymentTypeService(db, org_id).get_employment_type(
+                employee.employment_type_id
+            )
             if employee.employment_type_id
             else None
         )
@@ -2402,6 +2591,10 @@ class HRWebService:
         return {
             **base_context(request, auth, "Employee Details", "employees"),
             "employee": employee,
+            "final_payroll_pending": bool(
+                getattr(employee, "eligible_for_final_payroll", False)
+                and getattr(employee, "final_payroll_processed_at", None) is None
+            ),
             "recent_activity": get_recent_activity_for_record(
                 db,
                 org_id,
@@ -2493,10 +2686,7 @@ class HRWebService:
             DesignationFilters(is_active=True),
             PaginationParams(limit=DROPDOWN_LIMIT),
         ).items
-        employment_types = org_svc.list_employment_types(
-            EmploymentTypeFilters(is_active=True),
-            PaginationParams(limit=DROPDOWN_LIMIT),
-        ).items
+        employment_types = self._list_employee_employment_types(db, org_id)
         grades = org_svc.list_employee_grades(
             EmployeeGradeFilters(is_active=True),
             PaginationParams(limit=DROPDOWN_LIMIT),
@@ -2706,6 +2896,30 @@ class HRWebService:
         return [g.value for g in Gender if g != Gender.unknown]
 
     @staticmethod
+    def _list_employee_employment_types(
+        db: Session,
+        organization_id: UUID,
+        current_employment_type_id: UUID | None = None,
+    ) -> list[EmploymentTypeView]:
+        """Return every active option plus a missing current assignment."""
+        owner = EmploymentTypeService(db, organization_id)
+        options = list(owner.iter_all(active=True))
+        option_ids = {row.employment_type_id for row in options}
+        if (
+            current_employment_type_id is not None
+            and current_employment_type_id not in option_ids
+        ):
+            options.append(owner.get_employment_type(current_employment_type_id))
+        options.sort(
+            key=lambda row: (
+                row.type_name.casefold(),
+                row.type_name,
+                row.employment_type_id,
+            )
+        )
+        return options
+
+    @staticmethod
     def _list_pfas(db: Session) -> list[PFADirectory]:
         """Return the PFA dictionary ordered by name."""
         rows = db.scalars(
@@ -2742,10 +2956,11 @@ class HRWebService:
             DesignationFilters(is_active=True),
             PaginationParams(limit=DROPDOWN_LIMIT),
         ).items
-        employment_types = org_svc.list_employment_types(
-            EmploymentTypeFilters(is_active=True),
-            PaginationParams(limit=DROPDOWN_LIMIT),
-        ).items
+        employment_types = self._list_employee_employment_types(
+            db,
+            org_id,
+            employee.employment_type_id,
+        )
         grades = org_svc.list_employee_grades(
             EmployeeGradeFilters(is_active=True),
             PaginationParams(limit=DROPDOWN_LIMIT),
@@ -2996,12 +3211,17 @@ class HRWebService:
         filters = EmployeeFilters(department_id=department.department_id)
         pagination = PaginationParams.from_page(page, DEFAULT_PAGE_SIZE)
         result = emp_svc.list_employees(filters, pagination, eager_load=True)
+        employment_types_by_id = {
+            row.employment_type_id: row
+            for row in EmploymentTypeService(db, org_id).iter_all(active=None)
+        }
 
         context = {
             **base_context(request, auth, department.department_name, "departments"),
             "department": department,
             "headcount": headcount,
             "employees": result.items,
+            "employment_types_by_id": employment_types_by_id,
             "success": request.query_params.get("success"),
             "error": request.query_params.get("error"),
             "can_manage_departments": _can_manage_departments(auth),
@@ -3101,7 +3321,7 @@ class HRWebService:
     ) -> HTMLResponse:
         """Render employment types list page."""
         org_id = coerce_uuid(auth.organization_id)
-        svc = OrganizationService(db, org_id)
+        svc = EmploymentTypeService(db, org_id)
 
         filters = EmploymentTypeFilters(search=search)
         pagination = PaginationParams.from_page(page, DEFAULT_PAGE_SIZE)
@@ -3110,6 +3330,9 @@ class HRWebService:
         context = {
             **base_context(request, auth, "Employment Types", "employment-types"),
             "employment_types": result.items,
+            "can_manage_employment_types": auth.has_permission(
+                "hr:employment_types:manage"
+            ),
             "search": search or "",
             "page": page,
             "total_pages": result.total_pages,
@@ -3135,7 +3358,7 @@ class HRWebService:
     ) -> HTMLResponse:
         """Render employment type form (new or edit)."""
         org_id = coerce_uuid(auth.organization_id)
-        svc = OrganizationService(db, org_id)
+        svc = EmploymentTypeService(db, org_id)
 
         employment_type = None
         if employment_type_id:

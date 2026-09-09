@@ -6,13 +6,19 @@ Provides HR admin interface for managing:
 - Acknowledgment tracking
 """
 
+import re
+from urllib.parse import quote
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.services.people.hr.handbook_service import HRDocumentService
+from app.services.people.hr.handbook_service import (
+    HRDocumentFileNotFoundError,
+    HRDocumentService,
+    HRDocumentStorageUnavailableError,
+)
 from app.services.people.hr.web.handbook_web import handbook_web_service
 from app.web.deps import get_db_for_org, WebAuthContext, require_hr_access
 
@@ -141,32 +147,28 @@ def download_document(
     db: Session = Depends(get_db_for_org),
 ):
     """Download document file."""
-    from fastapi import HTTPException
-
     service = HRDocumentService(db)
     document = service.get_document(auth.organization_id, document_id)
-    file_path = service.get_document_path(document)
-
-    # SECURITY: Validate file_path is within the upload directory
-    # Resolve both paths to handle symlinks and relative components
     try:
-        resolved_path = file_path.resolve(strict=True)
-        resolved_upload_dir = service.UPLOAD_DIR.resolve()
+        chunks, content_type, content_length = service.stream_document(document)
+    except HRDocumentFileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="File not found") from exc
+    except HRDocumentStorageUnavailableError as exc:
+        raise HTTPException(
+            status_code=503, detail="Document storage is temporarily unavailable"
+        ) from exc
 
-        # Ensure the file is within the upload directory
-        if not str(resolved_path).startswith(str(resolved_upload_dir)):
-            raise HTTPException(status_code=403, detail="Access denied")
+    safe_name = re.sub(r'[\x00-\x1f\x7f"\\]', "_", document.file_name)
+    headers = {
+        "Content-Disposition": (
+            f"attachment; filename=\"{safe_name}\"; filename*=UTF-8''{quote(safe_name)}"
+        )
+    }
+    if content_length is not None:
+        headers["Content-Length"] = str(content_length)
 
-        # Verify file path contains expected org_id
-        expected_org_path = resolved_upload_dir / str(auth.organization_id)
-        if not str(resolved_path).startswith(str(expected_org_path)):
-            raise HTTPException(status_code=403, detail="Access denied")
-
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="File not found")
-
-    return FileResponse(
-        path=resolved_path,
-        filename=document.file_name,
-        media_type=document.content_type,
+    return StreamingResponse(
+        chunks,
+        media_type=content_type or document.content_type,
+        headers=headers,
     )

@@ -4,8 +4,8 @@ HR Document / Handbook Service.
 Provides operations for managing HR policy documents and employee acknowledgments.
 """
 
-import hashlib
 import logging
+from collections.abc import Iterator
 from datetime import date, datetime, timezone
 
 try:
@@ -13,13 +13,11 @@ try:
 except ImportError:  # pragma: no cover
     UTC = timezone.utc
 
-from pathlib import Path
 from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
 
-from app.config import settings
 from app.models.people.hr import Employee, EmployeeStatus
 from app.models.people.hr.handbook import (
     DocumentCategory,
@@ -27,12 +25,20 @@ from app.models.people.hr.handbook import (
     HRDocument,
     HRDocumentAcknowledgment,
 )
+from app.services.file_upload import (
+    FileStorageError,
+    FileUploadError,
+    get_hr_handbook_upload,
+)
+from app.services.storage import get_storage
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
     "HRDocumentService",
+    "HRDocumentFileNotFoundError",
     "HRDocumentNotFoundError",
+    "HRDocumentStorageUnavailableError",
     "HRDocumentValidationError",
 ]
 
@@ -52,6 +58,18 @@ class HRDocumentValidationError(Exception):
     pass
 
 
+class HRDocumentFileNotFoundError(Exception):
+    """The document metadata exists but its stored object does not."""
+
+    pass
+
+
+class HRDocumentStorageUnavailableError(Exception):
+    """The document object store did not complete the requested operation."""
+
+    pass
+
+
 class HRDocumentService:
     """
     Service for managing HR documents and acknowledgments.
@@ -63,9 +81,6 @@ class HRDocumentService:
     - Acknowledgment tracking
     - Compliance reporting
     """
-
-    # Default upload directory
-    UPLOAD_DIR = Path(getattr(settings, "hr_documents_dir", "uploads/hr_documents"))
 
     def __init__(self, db: Session):
         self.db = db
@@ -349,6 +364,7 @@ class HRDocumentService:
         org_id: UUID,
         file_name: str,
         file_content: bytes,
+        content_type: str | None = None,
     ) -> tuple[str, int, str]:
         """
         Save a document file and return (path, size, hash).
@@ -357,70 +373,74 @@ class HRDocumentService:
             org_id: Organization ID
             file_name: Original filename
             file_content: File bytes
+            content_type: Browser-declared media type retained as object metadata
 
         Returns:
             Tuple of (relative_path, file_size_bytes, content_hash)
 
         Raises:
-            HRDocumentValidationError: If file cannot be saved (disk full, permission denied, etc.)
+            HRDocumentValidationError: If the file violates the handbook contract.
+            HRDocumentStorageUnavailableError: If object storage is unavailable.
         """
-        # Generate unique filename
-        import uuid as uuid_module
-
-        file_id = str(uuid_module.uuid4())
-        ext = Path(file_name).suffix or ".pdf"
-
-        # Validate extension (only allow safe document types)
-        allowed_extensions = {".pdf", ".doc", ".docx", ".txt", ".rtf"}
-        if ext.lower() not in allowed_extensions:
-            raise HRDocumentValidationError(
-                f"File type '{ext}' not allowed. Allowed types: {', '.join(allowed_extensions)}"
-            )
-
-        safe_name = f"{file_id}{ext}"
-
         try:
-            # Create org-specific directory
-            org_dir = self.UPLOAD_DIR / str(org_id)
-            org_dir.mkdir(parents=True, exist_ok=True)
-
-            file_path = org_dir / safe_name
-
-            # Write file
-            file_path.write_bytes(file_content)
-
-        except PermissionError:
-            logger.error("Permission denied saving HR document to %s", self.UPLOAD_DIR)
-            raise HRDocumentValidationError(
-                "Unable to save document: permission denied. Please contact administrator."
+            result = get_hr_handbook_upload().save(
+                file_content,
+                content_type=content_type,
+                subdirs=(str(org_id),),
+                original_filename=file_name,
             )
-        except OSError as e:
-            # Covers disk full, I/O errors, etc.
-            if "No space left on device" in str(e) or e.errno == 28:  # ENOSPC
-                logger.error("Disk full when saving HR document")
-                raise HRDocumentValidationError(
-                    "Unable to save document: storage is full. Please contact administrator."
-                )
-            logger.exception("OS error saving HR document: %s", e)
-            raise HRDocumentValidationError(
-                f"Unable to save document: {e}. Please try again or contact administrator."
+        except FileStorageError as exc:
+            raise HRDocumentStorageUnavailableError(
+                "Document storage is temporarily unavailable"
+            ) from exc
+        except FileUploadError as exc:
+            raise HRDocumentValidationError(str(exc)) from exc
+
+        if result.checksum is None:  # pragma: no cover - fixed by the config contract
+            raise HRDocumentStorageUnavailableError(
+                "Document storage omitted the required checksum"
             )
-
-        # Calculate hash
-        content_hash = hashlib.sha256(file_content).hexdigest()
-
-        # Return relative path
-        relative_path = f"{org_id}/{safe_name}"
 
         logger.info(
-            "Saved HR document file: %s (%d bytes)", relative_path, len(file_content)
+            "Saved HR document object: %s (%d bytes)",
+            result.s3_key,
+            result.file_size,
         )
 
-        return relative_path, len(file_content), content_hash
+        return result.s3_key, result.file_size, result.checksum
 
-    def get_document_path(self, document: HRDocument) -> Path:
-        """Get full filesystem path for a document."""
-        return self.UPLOAD_DIR / document.file_path
+    @staticmethod
+    def _document_storage_key(document: HRDocument) -> str:
+        """Resolve a domain-owned opaque reference to the handbook S3 prefix."""
+        key = document.file_path.removeprefix("s3://")
+        expected_prefix = f"hr_documents/{document.organization_id}/"
+        if key.startswith(expected_prefix):
+            return key
+
+        # Earlier S3 callers stored the prefix-relative reference. This is only
+        # reference normalization; no local-filesystem fallback remains.
+        legacy_prefix = f"{document.organization_id}/"
+        if key.startswith(legacy_prefix):
+            return f"hr_documents/{key}"
+        raise HRDocumentFileNotFoundError("Document object reference is invalid")
+
+    def stream_document(
+        self,
+        document: HRDocument,
+    ) -> tuple[Iterator[bytes], str | None, int | None]:
+        """Open an authenticated handbook object without a local fallback."""
+        key = self._document_storage_key(document)
+        try:
+            storage = get_storage()
+            if not storage.exists(key):
+                raise HRDocumentFileNotFoundError("Document object was not found")
+            return storage.stream(key)
+        except HRDocumentFileNotFoundError:
+            raise
+        except Exception as exc:
+            raise HRDocumentStorageUnavailableError(
+                "Document storage is temporarily unavailable"
+            ) from exc
 
     # =========================================================================
     # Acknowledgment Management

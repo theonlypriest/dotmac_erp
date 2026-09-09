@@ -154,6 +154,10 @@ hr	salary_review	submitted_by_id	public	people	id	NO ACTION	NO ACTION	SIMPLE	fal
 hr	salary_review	updated_by_id	public	people	id	NO ACTION	NO ACTION	SIMPLE	false	false
 hr	skill	created_by_id	public	people	id	NO ACTION	NO ACTION	SIMPLE	false	false
 hr	skill	updated_by_id	public	people	id	NO ACTION	NO ACTION	SIMPLE	false	false
+hr	staff_account_status_projection	employee_id	hr	employee	employee_id	NO ACTION	NO ACTION	SIMPLE	false	false
+hr	staff_account_status_projection	person_id	public	people	id	NO ACTION	NO ACTION	SIMPLE	false	false
+hr	staff_leave_access_restriction	employee_id	hr	employee	employee_id	NO ACTION	NO ACTION	SIMPLE	false	false
+hr	staff_leave_access_restriction	person_id	public	people	id	NO ACTION	NO ACTION	SIMPLE	false	false
 hr	succession_candidate	employee_id	hr	employee	employee_id	NO ACTION	NO ACTION	SIMPLE	false	false
 hr	succession_plan	created_by_id	public	people	id	NO ACTION	NO ACTION	SIMPLE	false	false
 hr	succession_plan	incumbent_id	hr	employee	employee_id	NO ACTION	NO ACTION	SIMPLE	false	false

@@ -7,10 +7,8 @@
 #
 # Regenerate deliberately (only when burning entries down):
 #   python -m tests.architecture.test_script_rls_scope --update
-scripts/add_missing_contract_staff.py
 scripts/bulk_import.py
 scripts/fix_display_names.py
 scripts/import_dotmac_tb.py
 scripts/import_tb_audit.py
 scripts/link_gl_bank_accounts.py
-scripts/seed_payroll_from_excel.py

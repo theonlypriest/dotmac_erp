@@ -22,7 +22,7 @@ try:
 except ImportError:  # pragma: no cover
     UTC = timezone.utc
 
-from sqlalchemy import func, literal, or_, select, text, update
+from sqlalchemy import func, inspect as inspect_db, literal, or_, select, text, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session, selectinload
 
@@ -38,7 +38,6 @@ from app.models.people.hr import (
     Employee,
     EmployeeGrade,
     EmployeeStatus,
-    EmploymentType,
     Position,
     PositionAssignment,
     PositionAssignmentType,
@@ -49,6 +48,7 @@ from app.services.audit_dispatcher import fire_audit_event
 from app.services.auth_flow import hash_password, request_password_reset
 from app.services.common import PaginatedResult, PaginationParams, paginate
 from app.services.email import send_password_reset_email
+from app.services.people.hr.employment_types import EmploymentTypeService
 from app.services.people.hr.invite_email import (
     EMPLOYEE_INVITE_NEXT_URL,
     get_employee_invite_email_template,
@@ -447,7 +447,6 @@ class EmployeeService:
                 selectinload(Employee.person),
                 selectinload(Employee.department),
                 selectinload(Employee.designation),
-                selectinload(Employee.employment_type),
                 selectinload(Employee.default_shift_type),
             )
 
@@ -532,7 +531,6 @@ class EmployeeService:
                 joinedload(Employee.person),
                 joinedload(Employee.department),
                 joinedload(Employee.designation),
-                joinedload(Employee.employment_type),
                 joinedload(Employee.default_shift_type),
             )
 
@@ -721,9 +719,10 @@ class EmployeeService:
 
         self._validate_org_reference(Department, data.department_id, "Department")
         self._validate_org_reference(Designation, data.designation_id, "Designation")
-        self._validate_org_reference(
-            EmploymentType, data.employment_type_id, "Employment type"
-        )
+        if data.employment_type_id is not None:
+            EmploymentTypeService(
+                db=self.db, organization_id=self.organization_id
+            ).require_active(data.employment_type_id)
         self._validate_org_reference(EmployeeGrade, data.grade_id, "Employee grade")
         self._validate_org_reference(CostCenter, data.cost_center_id, "Cost center")
         self._validate_org_reference(Location, data.assigned_location_id, "Location")
@@ -800,6 +799,7 @@ class EmployeeService:
             },
         )
 
+        self._refresh_staff_access_projection(employee)
         if employee.dotmac_sub_access_enabled:
             self._enqueue_staff_sync(employee)
 
@@ -1015,6 +1015,7 @@ class EmployeeService:
             employee.status,
             employee.dotmac_sub_access_enabled,
             tuple(employee.dotmac_sub_roles or []),
+            employee.department_id,
         )
         prior_department_id = employee.department_id
 
@@ -1064,9 +1065,20 @@ class EmployeeService:
         # Update department
         if data.department_id is not None:
             self._validate_org_reference(Department, data.department_id, "Department")
+            department_changed = employee.department_id != data.department_id
             employee.department_id = data.department_id
+            if department_changed:
+                self._sync_active_primary_position_department(
+                    employee.employee_id,
+                    data.department_id,
+                )
         elif use_provided_fields and "department_id" in provided_fields:
+            department_changed = employee.department_id is not None
             employee.department_id = None
+            if department_changed:
+                self._sync_active_primary_position_department(
+                    employee.employee_id, None
+                )
 
         if employee.department_id != prior_department_id:
             self._sync_scheduling_department(employee)
@@ -1081,9 +1093,10 @@ class EmployeeService:
             employee.designation_id = None
 
         if data.employment_type_id is not None:
-            self._validate_org_reference(
-                EmploymentType, data.employment_type_id, "Employment type"
-            )
+            if data.employment_type_id != employee.employment_type_id:
+                EmploymentTypeService(
+                    db=self.db, organization_id=self.organization_id
+                ).require_active(data.employment_type_id)
             employee.employment_type_id = data.employment_type_id
         elif use_provided_fields and "employment_type_id" in provided_fields:
             employee.employment_type_id = None
@@ -1233,10 +1246,46 @@ class EmployeeService:
             employee.status,
             employee.dotmac_sub_access_enabled,
             tuple(employee.dotmac_sub_roles or []),
+            employee.department_id,
         )
+        self._refresh_staff_access_projection(employee)
         if current_staff_access != prior_staff_access:
             self._enqueue_staff_sync(employee)
 
+        return employee
+
+    def update_final_payroll_settings(
+        self,
+        employee_id: uuid.UUID,
+        *,
+        eligible_for_final_payroll: bool,
+        final_payroll_cutoff_date: date | None = None,
+    ) -> Employee:
+        """Update final payroll eligibility for an exited employee."""
+        employee = self.get_employee(employee_id, include_deleted=True)
+        if employee.status not in {
+            EmployeeStatus.RESIGNED,
+            EmployeeStatus.TERMINATED,
+            EmployeeStatus.RETIRED,
+        }:
+            raise EmployeeStatusError(
+                employee.status.value,
+                "Final payroll can only be managed for exited employees",
+            )
+
+        employee.eligible_for_final_payroll = eligible_for_final_payroll
+        if eligible_for_final_payroll:
+            employee.final_payroll_cutoff_date = (
+                final_payroll_cutoff_date or employee.date_of_leaving
+            )
+            employee.final_payroll_processed_at = None
+        else:
+            employee.final_payroll_cutoff_date = None
+
+        employee.updated_at = datetime.now(UTC)
+        employee.updated_by_id = self.principal.id if self.principal else None
+        employee.version += 1
+        self.db.flush()
         return employee
 
     def _sync_scheduling_department(self, employee: Employee) -> None:
@@ -1253,6 +1302,33 @@ class EmployeeService:
                 "Employee %s department change synced to scheduling assignments: %s",
                 employee.employee_id,
                 result,
+            )
+
+    def _sync_active_primary_position_department(
+        self,
+        employee_id: uuid.UUID,
+        department_id: uuid.UUID | None,
+    ) -> None:
+        """Keep an employee's active primary position aligned with their department."""
+        position = self.db.scalar(
+            select(Position)
+            .join(
+                PositionAssignment,
+                PositionAssignment.position_id == Position.position_id,
+            )
+            .where(
+                Position.organization_id == self.organization_id,
+                PositionAssignment.organization_id == self.organization_id,
+                PositionAssignment.employee_id == employee_id,
+                PositionAssignment.assignment_type == PositionAssignmentType.PRIMARY,
+                PositionAssignment.end_date.is_(None),
+            )
+        )
+        if position and position.department_id != department_id:
+            position.department_id = department_id
+            logger.info(
+                "Synced primary position department for employee %s",
+                employee_id,
             )
 
     # =========================================================================
@@ -1355,6 +1431,7 @@ class EmployeeService:
         employee.status = EmployeeStatus.TERMINATED
         employee.updated_at = datetime.now(UTC)
         employee.updated_by_id = self.principal.id if self.principal else None
+        self._refresh_staff_access_projection(employee)
 
     # =========================================================================
     # Status Management
@@ -1386,6 +1463,36 @@ class EmployeeService:
                 exc_info=True,
             )
 
+    def _refresh_staff_access_projection(self, employee: Employee) -> None:
+        """Refresh ERP-owned Selfcare-facing staff access projections."""
+        required_attrs = ("organization_id", "employee_id", "person_id", "status")
+        if any(getattr(employee, attr, None) is None for attr in required_attrs):
+            return
+        required_db_attrs = (
+            "add",
+            "connection",
+            "flush",
+            "get_bind",
+            "scalar",
+            "scalars",
+        )
+        if not all(hasattr(self.db, attr) for attr in required_db_attrs):
+            return
+        bind = self.db.get_bind()
+        if getattr(bind.dialect, "name", "") == "sqlite":
+            inspector = inspect_db(self.db.connection())
+            has_projection_tables = inspector.has_table(
+                "staff_account_status_projection"
+            ) and inspector.has_table("staff_leave_access_restriction")
+            if not has_projection_tables:
+                return
+
+        from app.services.people.hr.staff_access_projection import (
+            StaffAccessProjectionService,
+        )
+
+        StaffAccessProjectionService(self.db).refresh_employee_projections(employee)
+
     def activate_employee(self, employee_id: uuid.UUID) -> Employee:
         """Activate an employee.
 
@@ -1402,6 +1509,7 @@ class EmployeeService:
         employee.status = EmployeeStatus.ACTIVE
         employee.updated_at = datetime.now(UTC)
         employee.updated_by_id = self.principal.id if self.principal else None
+        self._refresh_staff_access_projection(employee)
         self._enqueue_staff_sync(employee)
         return employee
 
@@ -1425,6 +1533,7 @@ class EmployeeService:
         employee.updated_at = datetime.now(UTC)
         employee.updated_by_id = self.principal.id if self.principal else None
         # Note: reason could be stored in notes field or separate audit log
+        self._refresh_staff_access_projection(employee)
         self._enqueue_staff_sync(employee)
         return employee
 
@@ -1478,6 +1587,7 @@ class EmployeeService:
             reason=data.reason if hasattr(data, "reason") else None,
         )
 
+        self._refresh_staff_access_projection(employee)
         self._enqueue_staff_sync(employee)
         return employee
 
@@ -1513,6 +1623,7 @@ class EmployeeService:
         employee.final_payroll_processed_at = None
         employee.updated_at = datetime.now(UTC)
         employee.updated_by_id = self.principal.id if self.principal else None
+        self._refresh_staff_access_projection(employee)
         self._enqueue_staff_sync(employee)
         return employee
 
@@ -1588,6 +1699,7 @@ class EmployeeService:
                 employee.employee_id,
             )
 
+        self._refresh_staff_access_projection(employee)
         return employee
 
     def set_on_leave(self, employee_id: uuid.UUID) -> Employee:
@@ -1614,6 +1726,7 @@ class EmployeeService:
         employee.status = EmployeeStatus.ON_LEAVE
         employee.updated_at = datetime.now(UTC)
         employee.updated_by_id = self.principal.id if self.principal else None
+        self._refresh_staff_access_projection(employee)
 
         return employee
 
@@ -1691,6 +1804,17 @@ class EmployeeService:
                     updated_employee_id,
                     data.reports_to_id,
                 )
+        if "status" in updates:
+            employees = list(
+                self.db.scalars(
+                    select(Employee).where(
+                        Employee.organization_id == self.organization_id,
+                        Employee.employee_id.in_(data.ids),
+                    )
+                ).all()
+            )
+            for employee in employees:
+                self._refresh_staff_access_projection(employee)
 
         return result
 
@@ -1725,5 +1849,16 @@ class EmployeeService:
         )
         result_proxy = cast(CursorResult[Any], self.db.execute(stmt))
         result.deleted_count = result_proxy.rowcount or 0
+        if result.deleted_count:
+            employees = list(
+                self.db.scalars(
+                    select(Employee).where(
+                        Employee.organization_id == self.organization_id,
+                        Employee.employee_id.in_(ids),
+                    )
+                ).all()
+            )
+            for employee in employees:
+                self._refresh_staff_access_projection(employee)
 
         return result

@@ -621,15 +621,21 @@ class GoodsReceiptService(ListResponseMixin):
 
     @staticmethod
     def _update_po_status(db: Session, po: PurchaseOrder) -> None:
-        """Update PO status based on received quantities."""
+        """Update PO status from the received quantities on its lines.
+
+        This used to also write `po.amount_received`.  It no longer does, and
+        must not again: the received amount is DERIVED by
+        `app.services.finance.ap.purchase_order_amounts`, which is its sole
+        owner.  `purchase_order_line.quantity_received` — written just above by
+        the receipt itself — is the authoritative input, and this method reads it
+        for the status decision only.
+        """
         total_ordered = Decimal("0")
         total_received = Decimal("0")
 
         for line in po.lines:
             total_ordered += line.quantity_ordered * line.unit_price
             total_received += line.quantity_received * line.unit_price
-
-        po.amount_received = total_received
 
         if total_received >= total_ordered:
             po.status = POStatus.RECEIVED

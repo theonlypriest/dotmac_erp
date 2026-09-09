@@ -7,7 +7,7 @@ creating a second writer or exporting ERP-only HR/payroll data.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -38,6 +38,7 @@ from app.services.people.hr.replacement_projection import (
     BackofficePeopleProjectionService,
     PeopleProjectionEntity,
 )
+from app.services.people.hr.employment_types import EmploymentTypeView
 
 
 ORG_A = UUID("00000000-0000-0000-0000-00000000000a")
@@ -189,6 +190,7 @@ def test_party_projection_is_tenant_scoped_keyset_paginated_and_fingerprinted(
 
 def test_projection_maps_the_released_contract_and_derives_department_head(
     db_session,
+    monkeypatch,
 ) -> None:
     _ensure_projection_tables(db_session.bind)
     person = Person(
@@ -261,6 +263,29 @@ def test_projection_maps_the_released_contract_and_derives_department_head(
     )
     db_session.flush()
 
+    authoritative_employment_type = EmploymentTypeView(
+        employment_type_id=employment_type.employment_type_id,
+        organization_id=ORG_A,
+        type_code="FULL-TIME",
+        type_name="Full time",
+        description="Permanent employment",
+        is_active=True,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    class FakeEmploymentTypeService:
+        def __init__(self, _db, organization_id):
+            assert organization_id == ORG_A
+
+        def iter_all(self):
+            return (authoritative_employment_type,)
+
+    monkeypatch.setattr(
+        "app.services.people.hr.replacement_projection.EmploymentTypeService",
+        FakeEmploymentTypeService,
+    )
+
     service = BackofficePeopleProjectionService(db_session)
 
     def projected(entity: PeopleProjectionEntity, source_id: UUID):
@@ -316,6 +341,102 @@ def test_projection_maps_the_released_contract_and_derives_department_head(
     assert assignment_item.assignment_type == "PRIMARY"
     assert assignment_item.start_date == date(2025, 1, 1)
     assert assignment_item.end_date is None
+
+
+def test_employment_type_projection_pages_complete_module_set_by_uuid(
+    monkeypatch,
+) -> None:
+    records = tuple(
+        EmploymentTypeView(
+            employment_type_id=UUID(int=index),
+            organization_id=ORG_A,
+            type_code=f"TYPE-{index:03d}",
+            type_name=f"Type {index:03d}",
+            description=None,
+            is_active=True,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        for index in range(205, 0, -1)
+    )
+
+    class FakeEmploymentTypeService:
+        def __init__(self, _db, organization_id):
+            assert organization_id == ORG_A
+
+        def iter_all(self):
+            return records
+
+    monkeypatch.setattr(
+        "app.services.people.hr.replacement_projection.EmploymentTypeService",
+        FakeEmploymentTypeService,
+    )
+    service = BackofficePeopleProjectionService(object())  # type: ignore[arg-type]
+
+    first = service.page(
+        organization_id=ORG_A,
+        entity=PeopleProjectionEntity.EMPLOYMENT_TYPE,
+        after=None,
+        limit=200,
+    )
+    assert len(first.items) == 200
+    assert first.items[0].source_id == UUID(int=1)
+    assert first.items[-1].source_id == UUID(int=200)
+    assert first.next_after == UUID(int=200)
+
+    second = service.page(
+        organization_id=ORG_A,
+        entity=PeopleProjectionEntity.EMPLOYMENT_TYPE,
+        after=first.next_after,
+        limit=200,
+    )
+    assert [item.source_id for item in second.items] == [
+        UUID(int=index) for index in range(201, 206)
+    ]
+    assert second.next_after is None
+
+
+def test_employment_type_projection_preserves_created_timestamp_when_never_updated(
+    monkeypatch,
+) -> None:
+    created_at = datetime(2026, 1, 1, tzinfo=UTC)
+    record = EmploymentTypeView(
+        employment_type_id=UUID(int=1),
+        organization_id=ORG_A,
+        type_code="PERMANENT",
+        type_name="Permanent",
+        description=None,
+        is_active=True,
+        created_at=created_at,
+        updated_at=None,
+    )
+
+    class FakeEmploymentTypeService:
+        def __init__(self, _db, organization_id):
+            assert organization_id == ORG_A
+
+        def iter_all(self):
+            return (record,)
+
+    monkeypatch.setattr(
+        "app.services.people.hr.replacement_projection.EmploymentTypeService",
+        FakeEmploymentTypeService,
+    )
+
+    page = BackofficePeopleProjectionService(object()).page(  # type: ignore[arg-type]
+        organization_id=ORG_A,
+        entity=PeopleProjectionEntity.EMPLOYMENT_TYPE,
+        after=None,
+        limit=200,
+    )
+
+    assert page.items[0].source_updated_at == created_at
+
+
+def test_projection_fingerprint_is_not_a_bootstrap_public_alias() -> None:
+    from app.services.people.hr import replacement_projection
+
+    assert not hasattr(replacement_projection, "people_projection_fingerprint")
 
 
 def test_backoffice_projection_scope_fails_closed_for_unscoped_keys() -> None:

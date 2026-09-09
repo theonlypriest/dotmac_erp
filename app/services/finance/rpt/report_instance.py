@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -32,7 +31,9 @@ from app.services.finance.rpt.report_definition import (
     ReportDefinitionInput,
     report_definition_service,
 )
+from app.services.file_upload import get_generated_report_upload
 from app.services.response import ListResponseMixin
+from app.services.storage import get_storage
 
 logger = logging.getLogger(__name__)
 
@@ -228,18 +229,19 @@ class ReportInstanceService(ListResponseMixin):
                 fiscal_period_id=instance.fiscal_period_id,
             )
 
-            output_dir = os.path.join(os.getcwd(), "reports_output")
-            os.makedirs(output_dir, exist_ok=True)
-            output_path = os.path.join(output_dir, f"{instance.instance_id}.json")
-            with open(output_path, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, default=str, indent=2)
-
-            output_size_bytes = os.path.getsize(output_path)
+            output_bytes = json.dumps(payload, default=str, indent=2).encode("utf-8")
+            upload = get_generated_report_upload().save(
+                output_bytes,
+                content_type="application/json",
+                subdirs=(str(org_id),),
+                prefix=str(instance.instance_id),
+                original_filename=f"{instance.instance_id}.json",
+            )
             instance = ReportInstanceService.complete_generation(
                 db=db,
                 instance_id=instance.instance_id,
-                output_file_path=output_path,
-                output_size_bytes=output_size_bytes,
+                output_file_path=f"s3://{upload.s3_key}",
+                output_size_bytes=upload.file_size,
             )
         except Exception as exc:  # noqa: BLE001
             instance = ReportInstanceService.fail_generation(
@@ -389,13 +391,30 @@ class ReportInstanceService(ListResponseMixin):
                 detail=f"Report instance is {instance.status.value}, output not available",
             )
 
-        if not instance.output_file_path or not os.path.exists(
-            instance.output_file_path
+        if not instance.output_file_path or not instance.output_file_path.startswith(
+            "s3://"
         ):
             raise HTTPException(status_code=404, detail="Report output not found")
 
-        with open(instance.output_file_path, encoding="utf-8") as handle:
-            return cast(dict[Any, Any], json.load(handle))
+        key = instance.output_file_path.removeprefix("s3://")
+        try:
+            storage = get_storage()
+            if not storage.exists(key):
+                raise HTTPException(status_code=404, detail="Report output not found")
+            content = storage.download(key)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503, detail="Report storage is temporarily unavailable"
+            ) from exc
+
+        try:
+            return cast(dict[Any, Any], json.loads(content))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise HTTPException(
+                status_code=500, detail="Report output is invalid"
+            ) from exc
 
     @staticmethod
     def _resolve_definition(

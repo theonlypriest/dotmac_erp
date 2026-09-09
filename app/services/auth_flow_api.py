@@ -36,13 +36,16 @@ from app.schemas.auth_flow import (
 from app.services import avatar as avatar_service
 from app.services.auth_flow import (
     hash_password,
+    password_reset_organization_hint,
     request_password_reset,
     reset_password,
     revoke_sessions_for_person,
     verify_password,
 )
 from app.services.common import coerce_uuid
+from app.db.session_context import session_for_org
 from app.services.email import send_password_reset_email
+from app.tenant_catalog import active_organization_ids
 
 logger = logging.getLogger(__name__)
 
@@ -274,23 +277,54 @@ class AuthFlowApiService:
         db: Session,
         app_url: str | None = None,
     ) -> ForgotPasswordResponse:
-        result = request_password_reset(db, payload.email)
-
-        if result:
-            send_password_reset_email(
-                db=db,
-                to_email=result["email"],
-                reset_token=result["token"],
-                person_name=result["person_name"],
-                app_url=app_url,
-                organization_id=result.get("organization_id"),
-            )
+        # The public auth dependency can bypass the ORM tenant filter, but it
+        # cannot bypass PostgreSQL RLS. Discover tenant ids through the narrow
+        # catalogue and do every person lookup and SMTP-profile lookup inside
+        # a fully scoped tenant session.
+        del db
+        for organization_id in active_organization_ids():
+            with session_for_org(organization_id) as tenant_db:
+                result = request_password_reset(tenant_db, payload.email)
+                if not result:
+                    continue
+                send_password_reset_email(
+                    db=tenant_db,
+                    to_email=result["email"],
+                    reset_token=result["token"],
+                    person_name=result["person_name"],
+                    app_url=app_url,
+                    organization_id=organization_id,
+                )
+                break
 
         return ForgotPasswordResponse()
 
     def reset_password(self, payload, db: Session):
-        reset_at = reset_password(db, payload.token, payload.new_password)
-        return reset_at
+        del db
+        organization_hint = password_reset_organization_hint(payload.token)
+        organization_ids = (
+            active_organization_ids(only=organization_hint)
+            if organization_hint is not None
+            else active_organization_ids()
+        )
+
+        for organization_id in organization_ids:
+            try:
+                with session_for_org(organization_id) as tenant_db:
+                    return reset_password(
+                        tenant_db,
+                        payload.token,
+                        payload.new_password,
+                    )
+            except HTTPException as exc:
+                # A legacy token has no tenant hint. Continue only when it is
+                # invalid in this tenant; a valid token's domain error must be
+                # returned to the caller unchanged.
+                if organization_hint is None and exc.status_code == 401:
+                    continue
+                raise
+
+        raise HTTPException(status_code=401, detail="Invalid reset token")
 
 
 auth_flow_api_service = AuthFlowApiService()

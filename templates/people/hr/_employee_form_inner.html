@@ -212,7 +212,7 @@
                             <option value="">Select Employment Type</option>
                             {% for emp_type in employment_types %}
                             <option value="{{ emp_type.employment_type_id }}" {{ 'selected' if (employee and employee.employment_type_id == emp_type.employment_type_id) or (form_data.employment_type_id == emp_type.employment_type_id | string) }}>
-                                {{ emp_type.type_name }}
+                                {{ emp_type.type_name }}{% if employee and employee.employment_type_id == emp_type.employment_type_id and not emp_type.is_active %} (Inactive — current){% endif %}
                             </option>
                             {% endfor %}
                         </select>

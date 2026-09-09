@@ -98,10 +98,11 @@ COPY --from=nuitka-compiler /app/gunicorn.conf.py ./gunicorn.conf.py
 COPY templates ./templates
 COPY alembic ./alembic
 COPY alembic.ini ./alembic.ini
-# The hardened-image rehearsal and operator preflight use the same read-only
-# verifier as standard deploys. Copy only that named entrypoint; the rest of
-# scripts/ is not part of the hardened runtime surface.
+# The hardened-image rehearsal and operator preflight use two named read-only
+# entrypoints: role verification and ambiguous activation outcome resolution.
+# The rest of scripts/ is not part of the hardened runtime surface.
 COPY scripts/bootstrap_database_roles.py ./scripts/bootstrap_database_roles.py
+COPY scripts/probe_people_employment_type_activation.py ./scripts/probe_people_employment_type_activation.py
 
 # Copy compiled CSS from builder stage
 COPY --from=css-builder /build/static/css/app.css ./static/css/app.css

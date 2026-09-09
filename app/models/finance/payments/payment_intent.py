@@ -19,15 +19,31 @@ from app.db import Base
 
 
 class PaymentIntentStatus(str, enum.Enum):
-    """Status of a payment intent."""
+    """Status of a payment intent.
+
+    Every member except ``INDETERMINATE`` asserts a FACT about the money: it
+    moved, it did not move, it moved and came back, nobody tried. ``FAILED`` in
+    particular is a claim that the payout did not happen, and downstream readers
+    treat it as one — the claim goes back to APPROVED, the intent becomes
+    resettable, the operator is told to try again.
+
+    ``INDETERMINATE`` is the one member that asserts nothing about the money. It
+    means we could not OBSERVE the outcome: the provider was unreachable, it
+    answered 5xx, the poll budget ran out with no verdict, or it reported a
+    status this system does not recognise. It is not a weaker FAILED, and it
+    must never be written where FAILED would do — see ADR-0007, adopting the
+    fleet rule in `dotmac_starter_mt` ADR-0032 (unobserved is UNKNOWN, never
+    ABSENT).
+    """
 
     PENDING = "PENDING"  # Created, awaiting payment
     PROCESSING = "PROCESSING"  # Payment in progress
     COMPLETED = "COMPLETED"  # Successfully paid
-    FAILED = "FAILED"  # Payment failed
+    FAILED = "FAILED"  # Provider said the payment did not happen
     REVERSED = "REVERSED"  # Completed but later reversed/refunded
     ABANDONED = "ABANDONED"  # User didn't complete
     EXPIRED = "EXPIRED"  # Timed out
+    INDETERMINATE = "INDETERMINATE"  # Outcome NOT OBSERVED - not a verdict
 
 
 class PaymentDirection(str, enum.Enum):
@@ -222,6 +238,15 @@ class PaymentIntent(Base):
         Text,
         nullable=True,
         comment="Last error message from transfer status polling",
+    )
+    unresolved_since: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment=(
+            "When this intent became INDETERMINATE (outcome unobserved). "
+            "NULL for every other status; the age of this timestamp is what "
+            "raises the operator signal and what the slow reconciler orders by."
+        ),
     )
 
     # Timestamps

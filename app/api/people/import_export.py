@@ -15,10 +15,12 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.api.deps import require_tenant_auth
-from app.db import get_db_session
+from app.api.deps import (
+    get_db_with_org,
+    require_organization_id,
+    require_tenant_auth,
+)
 from app.services.auth_dependencies import (
-    get_current_org_id,
     get_current_user_id,
     require_tenant_permission,
 )
@@ -194,8 +196,8 @@ async def get_supported_types(
 async def preview_import(
     entity_type: EntityType,
     file: UploadFile = File(...),
-    db: Session = Depends(get_db_session),
-    org_id: UUID = Depends(get_current_org_id),
+    db: Session = Depends(get_db_with_org),
+    org_id: UUID = Depends(require_organization_id),
     user_id: UUID = Depends(get_current_user_id),
     auth: dict = Depends(require_tenant_permission("import:preview")),
 ) -> ImportPreviewResponse:
@@ -239,8 +241,8 @@ async def import_data(
     skip_duplicates: bool = Form(default=True),
     dry_run: bool = Form(default=False),
     batch_size: int = Form(default=100),
-    db: Session = Depends(get_db_session),
-    org_id: UUID = Depends(get_current_org_id),
+    db: Session = Depends(get_db_with_org),
+    org_id: UUID = Depends(require_organization_id),
     user_id: UUID = Depends(get_current_user_id),
     auth: dict = Depends(require_tenant_permission("import:execute")),
 ) -> ImportResultResponse:

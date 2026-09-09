@@ -12,6 +12,7 @@ except ImportError:  # pragma: no cover
     UTC = timezone.utc  # type: ignore[assignment]
 
 from sqlalchemy import delete, select
+from sqlalchemy.exc import OperationalError
 
 from app.models.finance.ar.external_sync import EntityType
 from app.models.finance.ar.invoice import Invoice, InvoiceType
@@ -25,8 +26,9 @@ from app.services.dotmac_sub.client import (
 )
 from app.services.finance.money_boundary import round_to_minor_units, to_boundary_money
 
+from ._base import SyncWatermarkPosition
 from ._constants import DOTMAC_SUB_SYNC_MIN_DATE, SYSTEM_USER_ID, _PRE_CUTOFF_SENTINEL
-from ._progress import WatermarkProgress
+from ._progress import WatermarkPositionProgress
 from ._types import SyncResult
 
 logger = logging.getLogger(__name__)
@@ -87,6 +89,24 @@ class InvoiceSyncMixin:
     _resolve_source_sales_tax_code: Any
     _reprime_tenant_context: Any
     _functional_amount: Any
+    _get_sync_watermark_position: Any
+    _advance_sync_watermark_position: Any
+
+    def _invoice_watermark_position(self) -> SyncWatermarkPosition:
+        getter = getattr(self, "_get_sync_watermark_position", None)
+        if getter is not None:
+            return getter(EntityType.INVOICE)
+        return SyncWatermarkPosition(self._get_sync_watermark(EntityType.INVOICE), None)
+
+    def _advance_invoice_watermark_position(
+        self, position: SyncWatermarkPosition | None
+    ) -> None:
+        advancer = getattr(self, "_advance_sync_watermark_position", None)
+        if advancer is not None:
+            advancer(EntityType.INVOICE, position)
+            return
+        if position is not None:
+            self._advance_sync_watermark(EntityType.INVOICE, position.watermark_at)
 
     def sync_invoices(
         self,
@@ -101,14 +121,19 @@ class InvoiceSyncMixin:
         # Incremental pull: only when this is the unfiltered full sync (a
         # targeted account_id/status pull must not touch the global cursor).
         use_watermark = account_id is None and status is None
-        watermark = (
-            self._get_sync_watermark(EntityType.INVOICE) if use_watermark else None
+        watermark_position = (
+            self._invoice_watermark_position() if use_watermark else None
         )
+        watermark = watermark_position.watermark_at if watermark_position else None
         updated_since = watermark.isoformat() if watermark else None
-        # ONE shared owner for the park-vs-freeze cursor decision (see
-        # _progress.WatermarkProgress); parse rejections and savepoint row
-        # failures flow through the same accounting.
-        progress = WatermarkProgress(watermark, label="invoice")
+        # ONE shared owner for the compound cursor decision (see
+        # _progress.WatermarkPositionProgress); parse rejections and savepoint
+        # row failures flow through the same accounting.
+        progress = WatermarkPositionProgress(
+            watermark_position or SyncWatermarkPosition(None, None),
+            label="invoice",
+        )
+        limit_reached = False
 
         try:
             for inv in self.client.get_invoices(
@@ -117,14 +142,17 @@ class InvoiceSyncMixin:
                 updated_since=updated_since,
                 on_parse_error=progress.parse_error_collector(result),
             ):
-                # The global delta must drain completely. A timestamp-only
-                # watermark plus a row cap can loop forever when more than the
-                # cap share one updated_at value. Filtered reconciliation runs
-                # do not advance that watermark and may retain their cap.
-                if not use_watermark and batch_size and processed >= batch_size:
-                    result.message = f"Batch limit ({batch_size}) reached"
+                if (
+                    use_watermark
+                    and watermark_position is not None
+                    and watermark_position.includes(inv.updated_at, inv.id)
+                ):
+                    continue
+                if batch_size and processed >= batch_size:
+                    limit_reached = True
                     break
                 row_updated_at = inv.updated_at
+                savepoint = None
                 try:
                     savepoint = self.db.begin_nested()
                     self._sync_single_invoice(
@@ -132,33 +160,51 @@ class InvoiceSyncMixin:
                     )
                     savepoint.commit()
                     processed += 1
-                    progress.record_success(row_updated_at)
+                    progress.record_success(row_updated_at, inv.id)
                     if processed % 500 == 0:
                         self.db.commit()
                         self._reprime_tenant_context()
                         self.db.expunge_all()
                         logger.info("Progress: %d invoices processed", processed)
+                except OperationalError:
+                    if savepoint is not None:
+                        try:
+                            savepoint.rollback()
+                        except Exception:  # noqa: BLE001
+                            self.db.rollback()
+                    else:
+                        self.db.rollback()
+                    logger.exception(
+                        "Database error syncing invoice %s; aborting dotmac_sub run",
+                        inv.id,
+                    )
+                    raise
                 except Exception as e:  # noqa: BLE001
                     try:
-                        savepoint.rollback()
+                        if savepoint is not None:
+                            savepoint.rollback()
+                        else:
+                            self.db.rollback()
                     except Exception:  # noqa: BLE001
                         self.db.rollback()
                     result.errors.append(f"Invoice {inv.invoice_number}: {e!s}")
                     logger.exception("Error syncing invoice %s", inv.id)
-                    progress.record_failure(row_updated_at)
+                    progress.record_failure(row_updated_at, inv.id)
             # Advance the cursor only after the pull completed without an API
-            # error (inclusive >= means a re-pull of the boundary row is
-            # safe); an unpositioned failure freezes it (see WatermarkProgress).
+            # error. The upstream feed is ordered by updated_at,id; the stored
+            # id lets the next inclusive timestamp pull skip only the consumed
+            # same-timestamp prefix.
             if use_watermark:
-                progress.conclude(
-                    lambda cursor: self._advance_sync_watermark(
-                        EntityType.INVOICE, cursor
-                    )
-                )
+                progress.conclude(self._advance_invoice_watermark_position)
             self.db.flush()
+            suffix = (
+                f"; invoice work limit ({batch_size}) reached"
+                if limit_reached and batch_size
+                else ""
+            )
             result.message = (
                 f"Synced {result.created} new, {result.updated} updated, "
-                f"{result.skipped} skipped invoices"
+                f"{result.skipped} skipped invoices{suffix}"
             )
         except DotmacSubError as e:
             result.success = False
@@ -207,7 +253,7 @@ class InvoiceSyncMixin:
                 )
             )
 
-        customer_id = self._get_customer_for_account(inv.account_id)
+        customer_id = self._get_customer_for_account(inv.account_id, inv.account)
         if not customer_id:
             result.skipped += 1
             result.errors.append(
@@ -220,7 +266,12 @@ class InvoiceSyncMixin:
         due_date = inv.due_at.date() if inv.due_at else invoice_date
 
         if invoice_date < DOTMAC_SUB_SYNC_MIN_DATE:
-            self._record_sync(EntityType.INVOICE, external_id, _PRE_CUTOFF_SENTINEL)
+            self._record_sync(
+                EntityType.INVOICE,
+                external_id,
+                _PRE_CUTOFF_SENTINEL,
+                external_updated_at=inv.updated_at,
+            )
             result.skipped += 1
             return
 
@@ -275,7 +326,11 @@ class InvoiceSyncMixin:
             self._ensure_synced_invoice_posted(existing, created_by_user_id)
             result.updated += 1
             self._record_sync(
-                EntityType.INVOICE, external_id, existing.invoice_id, data_hash
+                EntityType.INVOICE,
+                external_id,
+                existing.invoice_id,
+                data_hash,
+                external_updated_at=inv.updated_at,
             )
             return
 
@@ -310,7 +365,11 @@ class InvoiceSyncMixin:
         self._ensure_synced_invoice_posted(invoice, created_by_user_id)
         result.created += 1
         self._record_sync(
-            EntityType.INVOICE, external_id, invoice.invoice_id, data_hash
+            EntityType.INVOICE,
+            external_id,
+            invoice.invoice_id,
+            data_hash,
+            external_updated_at=inv.updated_at,
         )
 
     def _create_lines(
@@ -614,7 +673,10 @@ class InvoiceSyncMixin:
             )
 
     def post_unposted_invoices(
-        self, created_by_user_id: UUID | None = None
+        self,
+        created_by_user_id: UUID | None = None,
+        *,
+        limit: int | None = None,
     ) -> dict[str, Any]:
         """Repair legacy Sub documents that reached ERP before GL posting."""
         stats: dict[str, Any] = {"posted": 0, "errors": []}
@@ -625,6 +687,8 @@ class InvoiceSyncMixin:
             ),
             Invoice.journal_entry_id.is_(None),
         )
+        if limit is not None:
+            stmt = stmt.limit(max(limit, 1))
         for invoice in self.db.scalars(stmt).all():
             savepoint = self.db.begin_nested()
             try:

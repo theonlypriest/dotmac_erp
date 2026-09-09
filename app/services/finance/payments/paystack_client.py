@@ -22,12 +22,54 @@ PAYSTACK_BASE_URL = "https://api.paystack.co"
 
 
 class PaystackError(Exception):
-    """Paystack API error."""
+    """Paystack API error.
+
+    Raised when Paystack ANSWERED and the answer was a refusal: a parsed
+    ``status: false`` body, or a 4xx that says the request was understood and
+    rejected. A caller may treat this as a statement about the thing it asked
+    about.
+    """
 
     def __init__(self, message: str, status_code: int | None = None):
         super().__init__(message)
         self.message = message
         self.status_code = status_code
+
+
+class PaystackUnreachable(PaystackError):
+    """Paystack did NOT answer, so nothing was learned about the money.
+
+    Connection refused, DNS failure, read/connect timeout, TLS error, a 5xx
+    from the edge — every case where the request may or may not have taken
+    effect upstream and we have no way to tell from here.
+
+    It subclasses ``PaystackError`` so existing ``except PaystackError``
+    handlers keep working unchanged; what the subclass buys is that a handler
+    which is about to write a VERDICT can ask whether it actually has one.
+    Nothing about this exception licenses a caller to record FAILED: "we could
+    not reach Paystack" and "Paystack told us this failed" are different claims
+    (ADR-0007; fleet rule in `dotmac_starter_mt` ADR-0032).
+    """
+
+
+def _from_http_status(message: str, error: httpx.HTTPStatusError) -> PaystackError:
+    """Classify an HTTP error response into verdict vs non-observation.
+
+    5xx is the provider failing to answer — the request may well have been
+    applied on their side, which is precisely why it is not evidence of
+    anything. 4xx is an answer: Paystack parsed the request and refused it.
+
+    Deliberately narrow. A 401 from a rotated key is technically also "we
+    learned nothing about the transfer", but it is a configuration fault with
+    its own loud failure mode, and widening the unreachable class to cover it
+    would park every mis-keyed deployment's payouts in INDETERMINATE. The
+    give-up path in ``PaymentService`` defends the money-critical direction
+    separately: there, anything that is not an affirmative provider verdict is
+    treated as unobserved.
+    """
+    status_code = error.response.status_code
+    factory = PaystackUnreachable if status_code >= 500 else PaystackError
+    return factory(message, status_code=status_code)
 
 
 @dataclass
@@ -319,13 +361,13 @@ class PaystackClient:
             )
         except httpx.HTTPStatusError as e:
             logger.error(f"Paystack initialize failed: {e.response.text}")
-            raise PaystackError(
+            raise _from_http_status(
                 f"Failed to initialize transaction: {e.response.text}",
-                status_code=e.response.status_code,
+                e,
             )
         except httpx.RequestError as e:
             logger.error(f"Paystack request error: {e}")
-            raise PaystackError(f"Request failed: {str(e)}")
+            raise PaystackUnreachable(f"Request failed: {str(e)}")
 
         if not data.get("status"):
             raise PaystackError(data.get("message", "Initialize failed"))
@@ -357,13 +399,13 @@ class PaystackClient:
             )
         except httpx.HTTPStatusError as e:
             logger.error(f"Paystack verify failed: {e.response.text}")
-            raise PaystackError(
+            raise _from_http_status(
                 f"Failed to verify transaction: {e.response.text}",
-                status_code=e.response.status_code,
+                e,
             )
         except httpx.RequestError as e:
             logger.error(f"Paystack request error: {e}")
-            raise PaystackError(f"Request failed: {str(e)}")
+            raise PaystackUnreachable(f"Request failed: {str(e)}")
 
         if not data.get("status"):
             raise PaystackError(data.get("message", "Verify failed"))
@@ -452,13 +494,13 @@ class PaystackClient:
             )
         except httpx.HTTPStatusError as e:
             logger.error(f"Paystack list banks failed: {e.response.text}")
-            raise PaystackError(
+            raise _from_http_status(
                 f"Failed to list banks: {e.response.text}",
-                status_code=e.response.status_code,
+                e,
             )
         except httpx.RequestError as e:
             logger.error(f"Paystack request error: {e}")
-            raise PaystackError(f"Request failed: {str(e)}")
+            raise PaystackUnreachable(f"Request failed: {str(e)}")
         if not data.get("status"):
             raise PaystackError(data.get("message", "List banks failed"))
 
@@ -500,13 +542,13 @@ class PaystackClient:
             )
         except httpx.HTTPStatusError as e:
             logger.error(f"Paystack resolve account failed: {e.response.text}")
-            raise PaystackError(
+            raise _from_http_status(
                 f"Failed to resolve account: {e.response.text}",
-                status_code=e.response.status_code,
+                e,
             )
         except httpx.RequestError as e:
             logger.error(f"Paystack request error: {e}")
-            raise PaystackError(f"Request failed: {str(e)}")
+            raise PaystackUnreachable(f"Request failed: {str(e)}")
         if not data.get("status"):
             raise PaystackError(data.get("message", "Resolve account failed"))
 
@@ -563,13 +605,13 @@ class PaystackClient:
             )
         except httpx.HTTPStatusError as e:
             logger.error(f"Paystack create recipient failed: {e.response.text}")
-            raise PaystackError(
+            raise _from_http_status(
                 f"Failed to create recipient: {e.response.text}",
-                status_code=e.response.status_code,
+                e,
             )
         except httpx.RequestError as e:
             logger.error(f"Paystack request error: {e}")
-            raise PaystackError(f"Request failed: {str(e)}")
+            raise PaystackUnreachable(f"Request failed: {str(e)}")
         if not data.get("status"):
             raise PaystackError(data.get("message", "Create recipient failed"))
 
@@ -622,13 +664,13 @@ class PaystackClient:
             )
         except httpx.HTTPStatusError as e:
             logger.error(f"Paystack initiate transfer failed: {e.response.text}")
-            raise PaystackError(
+            raise _from_http_status(
                 f"Failed to initiate transfer: {e.response.text}",
-                status_code=e.response.status_code,
+                e,
             )
         except httpx.RequestError as e:
             logger.error(f"Paystack request error: {e}")
-            raise PaystackError(f"Request failed: {str(e)}")
+            raise PaystackUnreachable(f"Request failed: {str(e)}")
         if not data.get("status"):
             raise PaystackError(data.get("message", "Initiate transfer failed"))
 
@@ -659,13 +701,13 @@ class PaystackClient:
             )
         except httpx.HTTPStatusError as e:
             logger.error(f"Paystack verify transfer failed: {e.response.text}")
-            raise PaystackError(
+            raise _from_http_status(
                 f"Failed to verify transfer: {e.response.text}",
-                status_code=e.response.status_code,
+                e,
             )
         except httpx.RequestError as e:
             logger.error(f"Paystack request error: {e}")
-            raise PaystackError(f"Request failed: {str(e)}")
+            raise PaystackUnreachable(f"Request failed: {str(e)}")
         if not data.get("status"):
             raise PaystackError(data.get("message", "Verify transfer failed"))
 
@@ -720,13 +762,13 @@ class PaystackClient:
             )
         except httpx.HTTPStatusError as e:
             logger.error(f"Paystack list transactions failed: {e.response.text}")
-            raise PaystackError(
+            raise _from_http_status(
                 f"Failed to list transactions: {e.response.text}",
-                status_code=e.response.status_code,
+                e,
             )
         except httpx.RequestError as e:
             logger.error(f"Paystack request error: {e}")
-            raise PaystackError(f"Request failed: {str(e)}")
+            raise PaystackUnreachable(f"Request failed: {str(e)}")
         if not data.get("status"):
             raise PaystackError(data.get("message", "List transactions failed"))
 
@@ -787,13 +829,13 @@ class PaystackClient:
             )
         except httpx.HTTPStatusError as e:
             logger.error(f"Paystack list transfers failed: {e.response.text}")
-            raise PaystackError(
+            raise _from_http_status(
                 f"Failed to list transfers: {e.response.text}",
-                status_code=e.response.status_code,
+                e,
             )
         except httpx.RequestError as e:
             logger.error(f"Paystack request error: {e}")
-            raise PaystackError(f"Request failed: {str(e)}")
+            raise PaystackUnreachable(f"Request failed: {str(e)}")
         if not data.get("status"):
             raise PaystackError(data.get("message", "List transfers failed"))
 
@@ -835,13 +877,13 @@ class PaystackClient:
             )
         except httpx.HTTPStatusError as e:
             logger.error(f"Paystack get balance failed: {e.response.text}")
-            raise PaystackError(
+            raise _from_http_status(
                 f"Failed to get balance: {e.response.text}",
-                status_code=e.response.status_code,
+                e,
             )
         except httpx.RequestError as e:
             logger.error(f"Paystack request error: {e}")
-            raise PaystackError(f"Request failed: {str(e)}")
+            raise PaystackUnreachable(f"Request failed: {str(e)}")
         if not data.get("status"):
             raise PaystackError(data.get("message", "Get balance failed"))
 
@@ -888,13 +930,13 @@ class PaystackClient:
             )
         except httpx.HTTPStatusError as e:
             logger.error(f"Paystack list settlements failed: {e.response.text}")
-            raise PaystackError(
+            raise _from_http_status(
                 f"Failed to list settlements: {e.response.text}",
-                status_code=e.response.status_code,
+                e,
             )
         except httpx.RequestError as e:
             logger.error(f"Paystack request error: {e}")
-            raise PaystackError(f"Request failed: {str(e)}")
+            raise PaystackUnreachable(f"Request failed: {str(e)}")
         if not data.get("status"):
             raise PaystackError(data.get("message", "List settlements failed"))
 
@@ -946,13 +988,13 @@ class PaystackClient:
             logger.error(
                 f"Paystack get settlement transactions failed: {e.response.text}"
             )
-            raise PaystackError(
+            raise _from_http_status(
                 f"Failed to get settlement transactions: {e.response.text}",
-                status_code=e.response.status_code,
+                e,
             )
         except httpx.RequestError as e:
             logger.error(f"Paystack request error: {e}")
-            raise PaystackError(f"Request failed: {str(e)}")
+            raise PaystackUnreachable(f"Request failed: {str(e)}")
         if not data.get("status"):
             raise PaystackError(
                 data.get("message", "Get settlement transactions failed")
@@ -1025,13 +1067,13 @@ class PaystackClient:
             )
         except httpx.HTTPStatusError as e:
             logger.error(f"Paystack create customer failed: {e.response.text}")
-            raise PaystackError(
+            raise _from_http_status(
                 f"Failed to create customer: {e.response.text}",
-                status_code=e.response.status_code,
+                e,
             )
         except httpx.RequestError as e:
             logger.error(f"Paystack request error: {e}")
-            raise PaystackError(f"Request failed: {str(e)}")
+            raise PaystackUnreachable(f"Request failed: {str(e)}")
         if not data.get("status"):
             raise PaystackError(data.get("message", "Create customer failed"))
 
@@ -1087,13 +1129,13 @@ class PaystackClient:
             )
         except httpx.HTTPStatusError as e:
             logger.error(f"Paystack update customer failed: {e.response.text}")
-            raise PaystackError(
+            raise _from_http_status(
                 f"Failed to update customer: {e.response.text}",
-                status_code=e.response.status_code,
+                e,
             )
         except httpx.RequestError as e:
             logger.error(f"Paystack request error: {e}")
-            raise PaystackError(f"Request failed: {str(e)}")
+            raise PaystackUnreachable(f"Request failed: {str(e)}")
         if not data.get("status"):
             raise PaystackError(data.get("message", "Update customer failed"))
 
@@ -1129,13 +1171,13 @@ class PaystackClient:
             if e.response.status_code == 404:
                 return None
             logger.error(f"Paystack get customer failed: {e.response.text}")
-            raise PaystackError(
+            raise _from_http_status(
                 f"Failed to get customer: {e.response.text}",
-                status_code=e.response.status_code,
+                e,
             )
         except httpx.RequestError as e:
             logger.error(f"Paystack request error: {e}")
-            raise PaystackError(f"Request failed: {str(e)}")
+            raise PaystackUnreachable(f"Request failed: {str(e)}")
         if not data.get("status"):
             return None
 

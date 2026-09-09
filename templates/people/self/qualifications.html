@@ -14,7 +14,9 @@
 {% endblock %}
 
 {% block content %}
-<div class="mx-auto max-w-6xl space-y-6">
+<div id="extended-profile-content" class="mx-auto max-w-6xl space-y-6"
+     hx-boost="true" hx-target="#extended-profile-content"
+     hx-select="#extended-profile-content" hx-swap="outerHTML" hx-push-url="false">
     <div class="card p-6">
         <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div>
@@ -27,16 +29,6 @@
                 {{ status_badge('PENDING', 'sm') }}
                 {% endif %}
             </div>
-        </div>
-    </div>
-
-    <div class="card p-4">
-        <div class="flex flex-wrap gap-2">
-            <a href="/people/self/qualifications" class="btn btn-secondary">Qualifications</a>
-            <a href="/people/self/certifications" class="btn btn-secondary">Certifications</a>
-            <a href="/people/self/skills" class="btn btn-secondary">Skills</a>
-            <a href="/people/self/dependents" class="btn btn-secondary">Dependants</a>
-            <a href="/people/self/documents" class="btn btn-secondary">My Documents</a>
         </div>
     </div>
 
@@ -54,13 +46,13 @@
                     <div class="flex items-center gap-2">
                         {{ status_badge(pending.status.value, 'sm') }}
                         {% if pending.batch_id %}
-                        <a href="/people/hr/info-changes/batches/{{ pending.batch_id }}" class="text-violet-600 hover:text-violet-700 dark:text-violet-400 dark:hover:text-violet-300">Batch {{ pending.batch_reference }}</a>
+                        <a href="/people/hr/info-changes/batches/{{ pending.batch_id }}" hx-boost="false" class="text-violet-600 hover:text-violet-700 dark:text-violet-400 dark:hover:text-violet-300">Batch {{ pending.batch_reference }}</a>
                         {% endif %}
                     </div>
                 </div>
                 <p class="mt-1 text-slate-500 dark:text-slate-400">Submitted {{ pending.created_at | format_datetime if pending.created_at else '-' }}</p>
                 {% if pending.pending_document_path %}
-                <a href="/people/self/info-change-evidence/{{ pending.request_id }}" class="mt-2 inline-flex text-sm font-medium text-violet-600 hover:underline dark:text-violet-400">Download pending evidence</a>
+                <a href="/people/self/info-change-evidence/{{ pending.request_id }}" hx-boost="false" class="mt-2 inline-flex text-sm font-medium text-violet-600 hover:underline dark:text-violet-400">Download pending evidence</a>
                 {% endif %}
             </div>
             {% endfor %}
@@ -89,7 +81,7 @@
     </div>
 
     {% if edit_record %}
-    <form method="post" enctype="multipart/form-data" class="card p-6 space-y-4">
+    <form method="post" action="/people/self/qualifications" enctype="multipart/form-data" class="card p-6 space-y-4">
         {{ request.state.csrf_form | safe }}
         <input type="hidden" name="qualification_id" value="{{ edit_record.qualification_id }}">
         <div>
@@ -126,7 +118,7 @@
         </div>
     </form>
     {% else %}
-    <form method="post" enctype="multipart/form-data" class="card p-6 space-y-6"
+    <form method="post" action="/people/self/qualifications" enctype="multipart/form-data" class="card p-6 space-y-6"
           x-data='{
               rows: {{ form_rows | tojson | safe }},
               maxRows: {{ max_batch_items }},

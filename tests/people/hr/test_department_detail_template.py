@@ -8,13 +8,14 @@ from app.web.deps import WebAuthContext
 
 
 def test_department_detail_renders_employee_table_rows() -> None:
+    employment_type_id = uuid4()
     employee = SimpleNamespace(
         employee_id=uuid4(),
         employee_code="EMP-001",
         full_name="Ada Lovelace",
         person=SimpleNamespace(email="ada@example.com"),
         designation=SimpleNamespace(designation_name="Engineer"),
-        employment_type=SimpleNamespace(type_name="Full Time"),
+        employment_type_id=employment_type_id,
         date_of_joining=date(2026, 1, 2),
         status=SimpleNamespace(value="ACTIVE"),
     )
@@ -38,6 +39,9 @@ def test_department_detail_renders_employee_table_rows() -> None:
         department=department,
         headcount=headcount,
         employees=[employee],
+        employment_types_by_id={
+            employment_type_id: SimpleNamespace(type_name="Full Time")
+        },
         page=1,
         total_pages=1,
         total=1,
@@ -82,6 +86,7 @@ def test_department_detail_renders_delete_button_for_department_managers() -> No
         department=department,
         headcount=headcount,
         employees=[],
+        employment_types_by_id={},
         success=None,
         error=None,
         can_manage_departments=True,

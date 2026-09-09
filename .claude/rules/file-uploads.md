@@ -1,7 +1,11 @@
 # File Upload Patterns
 
 ## Core Service
-All file uploads go through `app/services/file_upload.py`. NEVER implement custom validation or disk I/O in domain services.
+All durable file uploads go through `app/services/file_upload.py`, which delegates
+to the one `app.services.storage.S3StorageService` MinIO/S3 owner. NEVER implement
+custom persistent disk I/O in domain services and never add a local-filesystem
+fallback when object storage is unavailable. A domain stores only the opaque
+object key plus the metadata it owns.
 
 ## Adding a New Upload Domain
 
@@ -9,7 +13,7 @@ All file uploads go through `app/services/file_upload.py`. NEVER implement custo
 ```python
 def _new_domain_config() -> FileUploadConfig:
     return FileUploadConfig(
-        base_dir="/app/uploads/new-domain",
+        base_dir="/app/uploads/new-domain",  # compatibility/prefix input, not a disk target
         allowed_content_types=frozenset({...}),
         max_size_bytes=10 * 1024 * 1024,
         compute_checksum=True,     # for audit trail
@@ -50,7 +54,8 @@ Use `templates/components/_file_upload.html` macro for upload UI.
 See `.claude/rules/templates.md` for usage.
 
 ## Security Rules
-- Size MUST be validated BEFORE writing to disk
-- All paths MUST use `resolve_safe_path()` or equivalent `.resolve()` + `.relative_to()`
+- Size MUST be validated BEFORE object upload
 - Never use user-supplied filenames for storage — always generate UUID-based names
 - Validate magic bytes for document formats (PDF, DOC, DOCX, images)
+- A provider failure fails the operation; it is never treated as a missing object
+  and never falls back to a container path or named volume

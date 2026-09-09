@@ -486,6 +486,39 @@ def require_role(role_name: str):
     return _require_role
 
 
+def _enforce_staff_leave_write_restriction(
+    db: Session,
+    auth: dict,
+    permission_key: str,
+) -> None:
+    """Deny mutating permissions while the authenticated employee is on leave."""
+    organization_id = auth.get("organization_id")
+    person_id = auth.get("person_id")
+    if not organization_id or not person_id:
+        return
+
+    from app.services.people.hr.staff_access_projection import (
+        StaffAccessProjectionService,
+        is_mutating_permission_key,
+    )
+
+    if not is_mutating_permission_key(permission_key):
+        return
+    restriction = StaffAccessProjectionService(db).active_restriction_for_person(
+        coerce_uuid(organization_id),
+        coerce_uuid(person_id),
+    )
+    if restriction is not None:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "staff_on_leave_read_only",
+                "message": "Write access is temporarily paused during approved leave.",
+                "restriction_id": str(restriction.restriction_id),
+            },
+        )
+
+
 def require_permission(permission_key: str):
     def _require_permission(
         auth=Depends(require_user_auth),
@@ -495,6 +528,7 @@ def require_permission(permission_key: str):
         roles = set(auth.get("roles") or [])
         scopes = set(auth.get("scopes") or [])
         if "admin" in roles or permission_key in scopes:
+            _enforce_staff_leave_write_restriction(db, auth, permission_key)
             return auth
         permission = db.scalar(
             select(Permission)
@@ -514,6 +548,7 @@ def require_permission(permission_key: str):
         )
         if not has_permission:
             raise HTTPException(status_code=403, detail="Forbidden")
+        _enforce_staff_leave_write_restriction(db, auth, permission_key)
         return auth
 
     return _require_permission
@@ -652,6 +687,7 @@ def require_tenant_permission(permission_key: str):
         roles = set(auth.get("roles") or [])
         scopes = set(auth.get("scopes") or [])
         if "admin" in roles or permission_key in scopes:
+            _enforce_staff_leave_write_restriction(db, auth, permission_key)
             return auth
         permission = db.scalar(
             select(Permission)
@@ -671,6 +707,7 @@ def require_tenant_permission(permission_key: str):
         )
         if not has_permission:
             raise HTTPException(status_code=403, detail="Forbidden")
+        _enforce_staff_leave_write_restriction(db, auth, permission_key)
         return auth
 
     return _require_tenant_permission

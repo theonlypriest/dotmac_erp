@@ -114,6 +114,7 @@ COMPOSED_MODULE_LINEAGES: Final[dict[str, str]] = {
     "accounting": "ac_0001_accounting",
     "imports": "im_0001_import_runs",
     "numbering": "nu_0001_numbering",
+    "people": "pe_0001_people_directory",
     "tax": "tx_0003_result_fingerprint",
 }
 

@@ -37,6 +37,8 @@ from app.services.expense.service_common import (
 
 logger = logging.getLogger(__name__)
 
+EXPENSE_ITEM_DESCRIPTION_MAX_LENGTH = 500
+
 try:
     from datetime import UTC  # type: ignore
 except ImportError:  # pragma: no cover
@@ -44,6 +46,20 @@ except ImportError:  # pragma: no cover
 
 
 class ExpenseClaimMixin(ExpenseServiceBase):
+    @staticmethod
+    def _validate_item_description(value: object) -> str:
+        """Normalize an item description before it reaches ``VARCHAR(500)``."""
+        if not isinstance(value, str):
+            raise ValidationError("Expense item description is required.")
+        description = value.strip()
+        if not description:
+            raise ValidationError("Expense item description is required.")
+        if len(description) > EXPENSE_ITEM_DESCRIPTION_MAX_LENGTH:
+            raise ValidationError(
+                "Expense item description must be 500 characters or fewer."
+            )
+        return description
+
     @staticmethod
     def _stamp_created(claim: ExpenseClaim, actor_id: UUID | None) -> None:
         if actor_id is None:
@@ -198,6 +214,9 @@ class ExpenseClaimMixin(ExpenseServiceBase):
         total_amount = Decimal("0")
         if items:
             for idx, item_data in enumerate(items):
+                description = self._validate_item_description(
+                    item_data.get("description")
+                )
                 category = self.db.scalar(
                     select(ExpenseCategory).where(
                         ExpenseCategory.organization_id == org_id,
@@ -221,7 +240,7 @@ class ExpenseClaimMixin(ExpenseServiceBase):
                     claim_id=claim.claim_id,
                     expense_date=item_data["expense_date"],
                     category_id=item_data["category_id"],
-                    description=item_data["description"],
+                    description=description,
                     claimed_amount=item_data["claimed_amount"],
                     expense_account_id=item_data.get("expense_account_id")
                     or category.expense_account_id,
@@ -265,6 +284,8 @@ class ExpenseClaimMixin(ExpenseServiceBase):
         if claim.status != ExpenseClaimStatus.DRAFT:
             raise ExpenseClaimStatusError(claim.status.value, "add item")
 
+        description = self._validate_item_description(item_data.get("description"))
+
         category = self.get_category(org_id, item_data["category_id"])
         if item_data["claimed_amount"] is None or item_data["claimed_amount"] <= 0:
             raise ValidationError("Line amount must be greater than zero.")
@@ -284,7 +305,7 @@ class ExpenseClaimMixin(ExpenseServiceBase):
             claim_id=claim_id,
             expense_date=item_data["expense_date"],
             category_id=item_data["category_id"],
-            description=item_data["description"],
+            description=description,
             claimed_amount=item_data["claimed_amount"],
             expense_account_id=item_data.get("expense_account_id")
             or category.expense_account_id,
@@ -388,6 +409,8 @@ class ExpenseClaimMixin(ExpenseServiceBase):
         claim = self.get_claim(org_id, claim_id)
         if claim.status != ExpenseClaimStatus.DRAFT:
             raise ExpenseClaimStatusError(claim.status.value, "update item")
+
+        description = self._validate_item_description(description)
 
         item = self.db.scalar(
             select(ExpenseClaimItem).where(
@@ -559,8 +582,8 @@ class ExpenseClaimMixin(ExpenseServiceBase):
             new_values={"status": claim.status.value},
         )
 
-        if notify_approvers and eligible_approvers:
-            self._notify_approvers(claim, eligible_approvers)
+        if notify_approvers and chain.current_approvers:
+            self._notify_approvers(claim, chain.current_approvers)
         self._notify_submission_confirmed(claim)
 
         try:
@@ -626,7 +649,11 @@ class ExpenseClaimMixin(ExpenseServiceBase):
         except Exception as exc:
             logger.exception("Submission confirmation notification failed: %s", exc)
 
-    def _notify_approvers(self, claim: ExpenseClaim, approvers) -> None:
+    def _notify_approvers(
+        self,
+        claim: ExpenseClaim,
+        approver_ids: list[UUID],
+    ) -> None:
         from app.models.people.hr.employee import Employee
         from app.services.expense.expense_notifications import (
             ExpenseNotificationService,
@@ -637,12 +664,13 @@ class ExpenseClaimMixin(ExpenseServiceBase):
         inapp_service = NotificationService()
         submitter_name = claim.employee.full_name if claim.employee else ""
 
-        for approver_info in approvers[:3]:
-            approver = self.db.get(Employee, approver_info.employee_id)
+        for approver_id in dict.fromkeys(approver_ids):
+            approver = self.db.get(Employee, approver_id)
             if not approver:
                 continue
+            email_sent = False
             try:
-                email_service.notify_approval_needed(claim, approver)
+                email_sent = email_service.notify_approval_needed(claim, approver)
             except Exception as exc:
                 logger.exception(
                     "Email notification failed for approver %s: %s",
@@ -651,7 +679,7 @@ class ExpenseClaimMixin(ExpenseServiceBase):
                 )
             if approver.person_id:
                 try:
-                    inapp_service.notify_expense_submitted(
+                    notification = inapp_service.notify_expense_submitted(
                         self.db,
                         organization_id=claim.organization_id,
                         claim_id=claim.claim_id,
@@ -661,6 +689,13 @@ class ExpenseClaimMixin(ExpenseServiceBase):
                         amount=str(claim.total_claimed_amount),
                         actor_id=claim.employee.person_id if claim.employee else None,
                     )
+                    # The branded expense email is sent synchronously above.
+                    # Keep BOTH as a durable fallback only when that send
+                    # failed; otherwise prevent the central dispatcher from
+                    # sending a duplicate generic email.
+                    if email_sent:
+                        notification.email_sent = True
+                        notification.email_sent_at = datetime.now(UTC)
                 except Exception as exc:
                     logger.exception(
                         "In-app notification failed for approver %s: %s",
@@ -740,6 +775,8 @@ class ExpenseClaimMixin(ExpenseServiceBase):
                     claim.status = ExpenseClaimStatus.PENDING_APPROVAL
                     self._stamp_status_change(claim, actor_id)
                     self.db.flush()
+                    if send_notification:
+                        self._notify_approvers(claim, chain.current_approvers)
                     return claim
             if not self._begin_action(org_id, claim_id, ExpenseClaimActionType.APPROVE):
                 return claim
@@ -782,8 +819,11 @@ class ExpenseClaimMixin(ExpenseServiceBase):
                         changed = True
                     new_desc = correction_data.get("description")
                     if new_desc and new_desc.strip() != item.description:
+                        validated_description = self._validate_item_description(
+                            new_desc
+                        )
                         item.original_description = item.description
-                        item.description = new_desc.strip()
+                        item.description = validated_description
                         audit_entry["description_changed"] = "true"
                         changed = True
                     if changed:
@@ -936,16 +976,17 @@ class ExpenseClaimMixin(ExpenseServiceBase):
             self.db.get(Employee, approver_id) if approver_id is not None else None
         )
         approver_name = approver.full_name if approver else None
+        email_sent = False
         if claim.employee and claim.employee.work_email:
             try:
-                ExpenseNotificationService(self.db).notify_claim_approved(
+                email_sent = ExpenseNotificationService(self.db).notify_claim_approved(
                     claim, approver_name=approver_name
                 )
             except Exception as exc:
                 logger.exception("Email approval notification failed: %s", exc)
         if claim.employee and claim.employee.person_id:
             try:
-                NotificationService().notify_expense_approved(
+                notification = NotificationService().notify_expense_approved(
                     self.db,
                     organization_id=org_id,
                     claim_id=claim.claim_id,
@@ -954,6 +995,9 @@ class ExpenseClaimMixin(ExpenseServiceBase):
                     approver_name=approver_name or "Manager",
                     actor_id=approver.person_id if approver else None,
                 )
+                if email_sent:
+                    notification.email_sent = True
+                    notification.email_sent_at = datetime.now(UTC)
             except Exception as exc:
                 logger.exception("In-app approval notification failed: %s", exc)
 
@@ -1191,7 +1235,15 @@ class ExpenseClaimMixin(ExpenseServiceBase):
         )
 
     def has_payment_in_flight(self, org_id: UUID, claim_id: UUID) -> bool:
-        """Whether a payment for this claim is pending or processing."""
+        """Whether this claim has a payout that may still move money.
+
+        INDETERMINATE belongs in this set even though nothing is actively "in
+        flight" for it: the question this method answers is whether withdrawing
+        the approval could strand a real payout, and a payout whose outcome
+        nobody observed is the strongest case for yes there is. Treating it as
+        settled would let an approval be withdrawn out from under money that
+        may already have left the account (ADR-0007).
+        """
         from app.models.finance.payments.payment_intent import (
             PaymentIntent,
             PaymentIntentStatus,
@@ -1204,7 +1256,11 @@ class ExpenseClaimMixin(ExpenseServiceBase):
                     PaymentIntent.source_type == "EXPENSE_CLAIM",
                     PaymentIntent.source_id == claim_id,
                     PaymentIntent.status.in_(
-                        [PaymentIntentStatus.PENDING, PaymentIntentStatus.PROCESSING]
+                        [
+                            PaymentIntentStatus.PENDING,
+                            PaymentIntentStatus.PROCESSING,
+                            PaymentIntentStatus.INDETERMINATE,
+                        ]
                     ),
                 )
             )
@@ -1345,9 +1401,10 @@ class ExpenseClaimMixin(ExpenseServiceBase):
         from app.services.notification import NotificationService
 
         approver_name = approver.full_name if approver else None
+        email_sent = False
         if claim.employee and claim.employee.work_email:
             try:
-                ExpenseNotificationService(self.db).notify_claim_rejected(
+                email_sent = ExpenseNotificationService(self.db).notify_claim_rejected(
                     claim,
                     reason,
                     approver_name=approver_name,
@@ -1356,7 +1413,7 @@ class ExpenseClaimMixin(ExpenseServiceBase):
                 logger.exception("Email rejection notification failed: %s", exc)
         if claim.employee and claim.employee.person_id:
             try:
-                NotificationService().notify_expense_rejected(
+                notification = NotificationService().notify_expense_rejected(
                     self.db,
                     organization_id=org_id,
                     claim_id=claim.claim_id,
@@ -1366,6 +1423,9 @@ class ExpenseClaimMixin(ExpenseServiceBase):
                     reason=reason,
                     actor_id=approver.person_id if approver else None,
                 )
+                if email_sent:
+                    notification.email_sent = True
+                    notification.email_sent_at = datetime.now(UTC)
             except Exception as exc:
                 logger.exception("In-app rejection notification failed: %s", exc)
 

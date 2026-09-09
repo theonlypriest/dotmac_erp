@@ -75,7 +75,6 @@ class MockPurchaseOrder:
         subtotal=Decimal("1000.00"),
         tax_amount=Decimal("100.00"),
         total_amount=Decimal("1100.00"),
-        amount_received=Decimal("0"),
         status=None,
         shipping_address=None,
         terms_and_conditions=None,
@@ -96,7 +95,6 @@ class MockPurchaseOrder:
         self.subtotal = subtotal
         self.tax_amount = tax_amount
         self.total_amount = total_amount
-        self.amount_received = amount_received
         self.status = status or MockPOStatus()
         self.shipping_address = shipping_address
         self.terms_and_conditions = terms_and_conditions
@@ -1025,13 +1023,18 @@ class TestCancelPO:
         mock_po = MockPurchaseOrder(
             po_id=po_id,
             organization_id=org_id,
-            amount_received=Decimal("0"),
         )
         mock_po.status = mock_draft
 
         db.scalars.return_value.first.return_value = mock_po
 
-        result = PurchaseOrderService.cancel_po(db, org_id, po_id)
+        # `amount_received` is DERIVED now, not a column on the row, so the
+        # guard reads it from its owner rather than off `mock_po`.
+        with patch(
+            "app.services.finance.ap.purchase_order_amounts.received_for",
+            return_value=Decimal("0"),
+        ):
+            result = PurchaseOrderService.cancel_po(db, org_id, po_id)
 
         assert result is not None
         assert mock_po.status == mock_cancelled
@@ -1112,13 +1115,20 @@ class TestCancelPO:
         mock_po = MockPurchaseOrder(
             po_id=po_id,
             organization_id=org_id,
-            amount_received=Decimal("500.00"),  # Has received goods
         )
         mock_po.status = mock_draft
 
         db.scalars.return_value.first.return_value = mock_po
 
-        with pytest.raises(HTTPException) as exc_info:
+        # The receipts are the authority here, not a stored header column: the
+        # guard asks `purchase_order_amounts`, which sums the line quantities.
+        with (
+            patch(
+                "app.services.finance.ap.purchase_order_amounts.received_for",
+                return_value=Decimal("500.00"),
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
             PurchaseOrderService.cancel_po(db, org_id, po_id)
 
         assert exc_info.value.status_code == 400
@@ -1216,109 +1226,36 @@ class TestClosePO:
 # ===================== UPDATE RECEIVED AMOUNT TESTS =====================
 
 
-class TestUpdateReceivedAmount:
-    """Tests for updating received amount."""
+class TestTheReceivedAmountHasNoSetter:
+    """`update_received_amount` is gone, and must not come back.
 
-    @patch("app.services.finance.ap.purchase_order.POStatus")
-    def test_update_received_partial(self, mock_status_class):
-        """Test partial receipt updates status to PARTIALLY_RECEIVED."""
-        db = MagicMock()
-        po_id = uuid4()
+    It incremented `po.amount_received` by a caller-supplied delta while
+    `GoodsReceiptService._update_po_status` recomputed the same column absolutely
+    from the PO lines. Two writers, two different arithmetics, one column: the
+    stored value was whichever ran last. Nothing in `app/` ever called it — only
+    the tests that used to live here.
 
-        mock_received = MagicMock()
-        mock_partial = MagicMock()
-        mock_status_class.RECEIVED = mock_received
-        mock_status_class.PARTIALLY_RECEIVED = mock_partial
+    The received amount is now derived by
+    `app.services.finance.ap.purchase_order_amounts`, which stores nothing. The
+    behaviour those deleted tests covered (partial, full and over-delivery
+    totals) is proved end to end against real PostgreSQL in
+    `tests/integration/test_purchase_order_derived_amounts.py`, where the sum
+    can actually be exercised against real receipt rows.
+    """
 
-        mock_po = MockPurchaseOrder(
-            po_id=po_id,
-            total_amount=Decimal("1000.00"),
-            amount_received=Decimal("0"),
+    def test_the_service_exposes_no_received_amount_setter(self):
+        assert not hasattr(PurchaseOrderService, "update_received_amount"), (
+            "PurchaseOrderService.update_received_amount is back. The received "
+            "amount is derived by purchase_order_amounts and is stored nowhere; "
+            "a setter here is a second authority over the fact."
         )
 
-        db.scalars.return_value.first.return_value = mock_po
+    def test_the_purchase_order_model_has_no_amount_columns(self):
+        from app.models.finance.ap.purchase_order import PurchaseOrder
 
-        result = PurchaseOrderService.update_received_amount(
-            db, po_id, Decimal("500.00")
-        )
-
-        assert result is not None
-        assert mock_po.amount_received == Decimal("500.00")
-        assert mock_po.status == mock_partial
-        db.flush.assert_called()
-
-    @patch("app.services.finance.ap.purchase_order.POStatus")
-    def test_update_received_full(self, mock_status_class):
-        """Test full receipt updates status to RECEIVED."""
-        db = MagicMock()
-        po_id = uuid4()
-
-        mock_received = MagicMock()
-        mock_partial = MagicMock()
-        mock_status_class.RECEIVED = mock_received
-        mock_status_class.PARTIALLY_RECEIVED = mock_partial
-
-        mock_po = MockPurchaseOrder(
-            po_id=po_id,
-            total_amount=Decimal("1000.00"),
-            amount_received=Decimal("500.00"),
-        )
-
-        db.scalars.return_value.first.return_value = mock_po
-
-        result = PurchaseOrderService.update_received_amount(
-            db,
-            po_id,
-            Decimal("500.00"),  # Completes to 1000
-        )
-
-        assert result is not None
-        assert mock_po.amount_received == Decimal("1000.00")
-        assert mock_po.status == mock_received
-        db.flush.assert_called()
-
-    def test_update_received_not_found(self):
-        """Test updating non-existent PO."""
-        db = MagicMock()
-
-        db.scalars.return_value.first.return_value = None
-
-        with pytest.raises(HTTPException) as exc_info:
-            PurchaseOrderService.update_received_amount(db, uuid4(), Decimal("100.00"))
-
-        assert exc_info.value.status_code == 404
-
-    @patch("app.services.finance.ap.purchase_order.POStatus")
-    def test_update_received_over_total(self, mock_status_class):
-        """Test receipt can exceed total (over-delivery)."""
-        db = MagicMock()
-        po_id = uuid4()
-
-        mock_received = MagicMock()
-        mock_partial = MagicMock()
-        mock_status_class.RECEIVED = mock_received
-        mock_status_class.PARTIALLY_RECEIVED = mock_partial
-
-        mock_po = MockPurchaseOrder(
-            po_id=po_id,
-            total_amount=Decimal("1000.00"),
-            amount_received=Decimal("900.00"),
-        )
-
-        db.scalars.return_value.first.return_value = mock_po
-
-        result = PurchaseOrderService.update_received_amount(
-            db,
-            po_id,
-            Decimal("200.00"),  # Exceeds total
-        )
-
-        assert result is not None
-        assert mock_po.amount_received == Decimal("1100.00")
-        assert mock_po.status == mock_received  # Still marked as received
-
-
-# ===================== GETTER TESTS =====================
+        mapped = set(PurchaseOrder.__mapper__.columns.keys())
+        assert "amount_received" not in mapped
+        assert "amount_invoiced" not in mapped
 
 
 class TestGetters:

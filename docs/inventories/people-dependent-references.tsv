@@ -174,6 +174,10 @@ hr	salary_review	submitted_by_id	public	people	id	explicit	app/models/people/hr/
 hr	salary_review	updated_by_id	public	people	id	mixin_expansion	app/models/people/hr/salary_review.py:60 via app/models/people/base.py:66
 hr	skill	created_by_id	public	people	id	mixin_expansion	app/models/people/hr/employee_extended.py:678 via app/models/people/base.py:61
 hr	skill	updated_by_id	public	people	id	mixin_expansion	app/models/people/hr/employee_extended.py:678 via app/models/people/base.py:66
+hr	staff_account_status_projection	employee_id	hr	employee	employee_id	explicit	app/models/people/hr/staff_access_projection.py:182
+hr	staff_account_status_projection	person_id	public	people	id	explicit	app/models/people/hr/staff_access_projection.py:187
+hr	staff_leave_access_restriction	employee_id	hr	employee	employee_id	explicit	app/models/people/hr/staff_access_projection.py:94
+hr	staff_leave_access_restriction	person_id	public	people	id	explicit	app/models/people/hr/staff_access_projection.py:99
 hr	succession_candidate	employee_id	hr	employee	employee_id	explicit	app/models/people/hr/succession.py:190
 hr	succession_plan	created_by_id	public	people	id	mixin_expansion	app/models/people/hr/succession.py:77 via app/models/people/base.py:61
 hr	succession_plan	incumbent_id	hr	employee	employee_id	explicit	app/models/people/hr/succession.py:116

@@ -306,8 +306,9 @@
                                     {% endfor %}
                                 </select>
                             </td>
-                            <td>
-                                <input aria-label="Description" type="text" name="description_{{ item.item_id }}" value="{{ item.description }}" class="form-input text-sm" maxlength="500">
+                            <td x-data="{ descriptionLength: {{ item.description|length }} }">
+                                <input aria-label="Description" aria-describedby="description-count-{{ item.item_id }}" type="text" name="description_{{ item.item_id }}" value="{{ item.description }}" class="form-input text-sm" maxlength="500" @input="descriptionLength = $event.target.value.length">
+                                <span id="description-count-{{ item.item_id }}" class="form-hint" aria-live="polite"><span x-text="descriptionLength">{{ item.description|length }}</span> / 500 characters</span>
                             </td>
                             <td class="text-right font-mono tabular-nums text-slate-500">
                                 {{ item.claimed_amount | format_currency }}

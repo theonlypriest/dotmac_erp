@@ -30,6 +30,7 @@ import logging
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy import inspect as inspect_db
 from sqlalchemy.orm import Session
 
 from app.models.finance.audit.audit_log import AuditAction
@@ -73,6 +74,12 @@ def fire_audit_event(
         reason: Optional business reason for the change.
     """
     try:
+        bind = db.get_bind()
+        if getattr(bind.dialect, "name", "") == "sqlite":
+            inspector = inspect_db(db.connection())
+            if not inspector.has_table("audit_log"):
+                return
+
         from app.observability import (
             actor_id_var,
             ip_address_var,

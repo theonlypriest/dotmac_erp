@@ -31,6 +31,7 @@ def _employee(status: EmployeeStatus, *, leaving: date | None = None):
         final_payroll_processed_at=None,
         updated_at=None,
         updated_by_id=None,
+        version=0,
     )
 
 
@@ -131,6 +132,26 @@ def test_rehire_clears_final_payroll_fields(monkeypatch):
     assert result.final_payroll_processed_at is None
 
 
+def test_update_final_payroll_settings_disables_without_clearing_processed_at():
+    db = SimpleNamespace(flush=lambda: None)
+    svc = EmployeeService(db, uuid4())
+    emp = _employee(EmployeeStatus.RESIGNED, leaving=date(2026, 4, 25))
+    processed_at = object()
+    emp.eligible_for_final_payroll = True
+    emp.final_payroll_cutoff_date = date(2026, 4, 30)
+    emp.final_payroll_processed_at = processed_at
+    svc.get_employee = lambda _employee_id, include_deleted=False: emp
+
+    result = svc.update_final_payroll_settings(
+        emp.employee_id,
+        eligible_for_final_payroll=False,
+    )
+
+    assert result.eligible_for_final_payroll is False
+    assert result.final_payroll_cutoff_date is None
+    assert result.final_payroll_processed_at is processed_at
+
+
 @pytest.mark.asyncio
 async def test_resign_employee_response_blocks_unauthorized_final_payroll(
     db_session, monkeypatch
@@ -140,7 +161,7 @@ async def test_resign_employee_response_blocks_unauthorized_final_payroll(
 
     monkeypatch.setattr(
         "app.services.people.hr.web.employee_web.EmployeeService.get_employee",
-        lambda self, _employee_id: employee,
+        lambda self, _employee_id, include_deleted=False: employee,
     )
     monkeypatch.setattr(
         HRWebService,
@@ -183,17 +204,22 @@ async def test_update_final_payroll_response_updates_exited_employee(
 
     monkeypatch.setattr(
         "app.services.people.hr.web.employee_web.EmployeeService.get_employee",
-        lambda self, _employee_id: employee,
+        lambda self, _employee_id, include_deleted=False: employee,
     )
 
-    def _capture_update(self, _employee_id, data):
-        captured["eligible_for_final_payroll"] = data.eligible_for_final_payroll
-        captured["final_payroll_cutoff_date"] = data.final_payroll_cutoff_date
-        captured["provided_fields"] = data.provided_fields
+    def _capture_update(
+        self,
+        _employee_id,
+        *,
+        eligible_for_final_payroll,
+        final_payroll_cutoff_date,
+    ):
+        captured["eligible_for_final_payroll"] = eligible_for_final_payroll
+        captured["final_payroll_cutoff_date"] = final_payroll_cutoff_date
         return employee
 
     monkeypatch.setattr(
-        "app.services.people.hr.web.employee_web.EmployeeService.update_employee",
+        "app.services.people.hr.web.employee_web.EmployeeService.update_final_payroll_settings",
         _capture_update,
     )
 
@@ -215,10 +241,52 @@ async def test_update_final_payroll_response_updates_exited_employee(
     assert response.status_code == 303
     assert captured["eligible_for_final_payroll"] is True
     assert captured["final_payroll_cutoff_date"] == date(2026, 4, 30)
-    assert captured["provided_fields"] == {
-        "eligible_for_final_payroll",
-        "final_payroll_cutoff_date",
-    }
+
+
+@pytest.mark.asyncio
+async def test_update_final_payroll_response_accepts_unchecked_checkbox(
+    db_session, monkeypatch
+):
+    service = HRWebService()
+    employee = _employee(EmployeeStatus.RESIGNED, leaving=date(2026, 4, 25))
+    employee.eligible_for_final_payroll = True
+    employee.final_payroll_cutoff_date = date(2026, 4, 30)
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "app.services.people.hr.web.employee_web.EmployeeService.get_employee",
+        lambda self, _employee_id, include_deleted=False: employee,
+    )
+
+    def _capture_update(
+        self,
+        _employee_id,
+        *,
+        eligible_for_final_payroll,
+        final_payroll_cutoff_date,
+    ):
+        captured["eligible_for_final_payroll"] = eligible_for_final_payroll
+        captured["final_payroll_cutoff_date"] = final_payroll_cutoff_date
+        return employee
+
+    monkeypatch.setattr(
+        "app.services.people.hr.web.employee_web.EmployeeService.update_final_payroll_settings",
+        _capture_update,
+    )
+
+    request = _make_request({"final_payroll_cutoff_date": "2026-04-30"})
+    auth = _make_auth(roles=["hr_manager"])
+
+    response = await service.update_final_payroll_response(
+        request=request,
+        employee_id=employee.employee_id,
+        auth=auth,
+        db=db_session,
+    )
+
+    assert response.status_code == 303
+    assert captured["eligible_for_final_payroll"] is False
+    assert captured["final_payroll_cutoff_date"] is None
 
 
 def test_api_update_employee_blocks_unauthorized_final_payroll_cutoff_change(

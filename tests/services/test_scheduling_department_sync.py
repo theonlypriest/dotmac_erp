@@ -89,6 +89,49 @@ def test_update_employee_syncs_scheduling_when_department_changes(monkeypatch) -
     assert synced == [new_department_id]
 
 
+def test_update_employee_enqueues_staff_sync_when_department_changes(
+    monkeypatch,
+) -> None:
+    old_department_id = uuid4()
+    new_department_id = uuid4()
+    employee = SimpleNamespace(
+        employee_id=uuid4(),
+        organization_id=uuid4(),
+        employee_code="EMP-001",
+        department_id=old_department_id,
+        status="ACTIVE",
+        dotmac_sub_access_enabled=True,
+        dotmac_sub_roles=["staff"],
+        expense_approver_id=None,
+        version=1,
+    )
+    service = EmployeeService.__new__(EmployeeService)
+    service.db = MagicMock()
+    service.organization_id = employee.organization_id
+    service.principal = None
+    monkeypatch.setattr(service, "get_employee", lambda employee_id: employee)
+    monkeypatch.setattr(service, "_validate_org_reference", lambda *args: None)
+    monkeypatch.setattr(
+        "app.services.people.hr.employees.fire_audit_event", lambda **kwargs: None
+    )
+    monkeypatch.setattr(
+        EmployeeService, "_sync_scheduling_department", lambda *args: None
+    )
+    enqueued = []
+    monkeypatch.setattr(
+        EmployeeService,
+        "_enqueue_staff_sync",
+        lambda self, synced_employee: enqueued.append(synced_employee.department_id),
+    )
+
+    service.update_employee(
+        employee.employee_id,
+        EmployeeUpdateData(department_id=new_department_id),
+    )
+
+    assert enqueued == [new_department_id]
+
+
 def test_update_employee_does_not_sync_scheduling_when_department_unchanged(
     monkeypatch,
 ) -> None:

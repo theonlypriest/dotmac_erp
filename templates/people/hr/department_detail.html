@@ -160,8 +160,9 @@
                             {% endif %}
                         </td>
                         <td>
-                            {% if emp.employment_type %}
-                            <span class="text-sm text-slate-700 dark:text-slate-300">{{ emp.employment_type.type_name }}</span>
+                            {% set employment_type = employment_types_by_id.get(emp.employment_type_id) if emp.employment_type_id else none %}
+                            {% if employment_type %}
+                            <span class="text-sm text-slate-700 dark:text-slate-300">{{ employment_type.type_name }}</span>
                             {% else %}
                             <span class="text-sm text-slate-400 dark:text-slate-500">-</span>
                             {% endif %}

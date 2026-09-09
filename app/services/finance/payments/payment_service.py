@@ -19,7 +19,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.domain_settings import SettingDomain
@@ -36,11 +36,13 @@ from app.models.finance.payments.transfer_batch import (
     TransferBatchItemStatus,
     TransferBatchStatus,
 )
+from app.metrics import observe_transfer_unresolved
 from app.services.common import coerce_uuid
 from app.services.finance.payments.paystack_client import (
     PaystackClient,
     PaystackConfig,
     PaystackError,
+    PaystackUnreachable,
 )
 from app.services.finance.platform.org_context import org_context_service
 from app.services.settings_spec import resolve_value
@@ -56,13 +58,43 @@ plausibly lost its webhook.
 """
 
 TRANSFER_POLL_MAX_ATTEMPTS = 10
-"""Circuit breaker. After this many failed poll attempts the intent is marked
-FAILED rather than polled forever. At the scheduled cadence of one pass every
-two minutes that is roughly twenty minutes of retrying.
+"""Circuit breaker. After this many failed poll attempts the fast poller stops
+asking. At the scheduled cadence of one pass every two minutes that is roughly
+twenty minutes of retrying.
+
+Spending the budget is NOT a verdict. It ends the fast loop and nothing more:
+what the intent becomes then depends on whether Paystack ever answered — see
+:meth:`PaymentService._record_transfer_poll_failure`.
 
 This lived in ``app.tasks.expense`` while the worker still made the decision
 itself; it belongs with the owner of the column that decision writes.
 """
+
+_PAYSTACK_IN_FLIGHT_STATUSES = frozenset({"pending", "otp", "processing", "receipt"})
+"""Paystack transfer statuses that genuinely mean "still moving".
+
+Enumerated rather than assumed. Everything Paystack's transfer API documents is
+either terminal (``success``/``failed``/``reversed``, handled above) or one of
+these; a status outside BOTH sets is a word this system has never seen, and the
+honest thing to do with it is admit we do not know what it means rather than
+guess the reassuring interpretation.
+"""
+
+INDETERMINATE_RECHECK_INTERVAL = timedelta(hours=1)
+"""How long an INDETERMINATE intent rests between slow-reconciler attempts.
+
+The fast poller runs every two minutes because a webhook is merely late. An
+INDETERMINATE intent is a different animal: the fast loop already exhausted
+itself against it, so re-asking at that cadence is just load. It is re-asked
+hourly, forever, because the money is real and no amount of elapsed time turns
+"we do not know" into "it did not happen".
+"""
+
+TRANSFER_UNRESOLVED_ALERT_HOURS_DEFAULT = 6
+"""Fallback for ``paystack_transfer_unresolved_alert_hours`` (see the spec in
+``app.services.settings_spec`` for why six). Duplicated as a constant only so
+the reconciler still has a documented threshold if the settings row and the
+spec are both unreachable; the spec default is the real answer."""
 
 
 class TransferPollOutcome(str, enum.Enum):
@@ -74,6 +106,47 @@ class TransferPollOutcome(str, enum.Enum):
     ABANDONED = "abandoned"
     ERRORED = "errored"
     SKIPPED = "skipped"
+    #: The fast loop gave up without ever getting an answer out of Paystack.
+    #: Distinct from ABANDONED, which is reserved for the case where Paystack
+    #: DID answer and the answer was a refusal.
+    INDETERMINATE = "indeterminate"
+    #: The slow reconciler asked again and still could not observe an outcome.
+    STILL_UNRESOLVED = "still_unresolved"
+    #: Paystack said the money moved and came back.
+    REVERSED = "reversed"
+
+
+class TransferOutcomeUnknown(Exception):
+    """Initiation neither confirmed started nor confirmed refused.
+
+    Raised out of :meth:`PaymentService.initiate_expense_transfer` when the
+    request left this process and Paystack never told us what became of it.
+    The intent is INDETERMINATE by the time this is raised, and the caller's
+    only correct response is to STOP — not to retry, not to report a failure.
+    """
+
+    def __init__(self, intent_id: UUID, reason: str):
+        super().__init__(reason)
+        self.intent_id = intent_id
+        self.reason = reason
+
+
+def is_unobserved(error: BaseException) -> bool:
+    """Whether this exception leaves the transfer's outcome unknown.
+
+    Inverted on purpose. The question is not "is this a non-observation?" but
+    "did Paystack actually answer?", and only one exception type can say yes: a
+    ``PaystackError`` that is not a ``PaystackUnreachable`` — a parsed
+    ``status: false`` body or a 4xx refusal.
+
+    Everything else — a timeout, a 5xx, a bug in our own posting code, an
+    exception type that does not exist yet — is unobserved. Getting the default
+    the other way round is exactly the defect ADR-0007 fixes: the safe answer
+    must be the one you fall into, not the one you remember to write.
+    """
+    if isinstance(error, PaystackUnreachable):
+        return True
+    return not isinstance(error, PaystackError)
 
 
 @dataclass(frozen=True)
@@ -171,6 +244,15 @@ class PaymentService:
             raise HTTPException(status_code=400, detail="Invoice is already fully paid")
 
         # Check for existing active payment intent to prevent duplicate payments
+        #
+        # INDETERMINATE is deliberately absent from this list rather than
+        # forgotten: it is only ever written on the OUTBOUND transfer path, and
+        # this query is scoped to `source_type == "INVOICE"` (inbound
+        # collections), so no INDETERMINATE row can reach it. If inbound
+        # collection ever gains an unobserved outcome, it needs the same
+        # unconditional refusal `create_expense_payment_intent` has below — NOT
+        # an entry here, because the branch under this query would then stamp
+        # EXPIRED over an intent whose money may have moved.
         active_statuses = [PaymentIntentStatus.PENDING, PaymentIntentStatus.PROCESSING]
         existing_intent = self.db.scalar(
             select(PaymentIntent).where(
@@ -238,7 +320,10 @@ class PaymentService:
 
         # Get collection bank account from settings
         collection_bank_account_id = resolve_value(
-            self.db, SettingDomain.payments, "paystack_collection_bank_account_id"
+            self.db,
+            SettingDomain.payments,
+            "paystack_collection_bank_account_id",
+            organization_id=self.organization_id,
         )
         bank_account_uuid = None
         if collection_bank_account_id:
@@ -737,6 +822,27 @@ class PaymentService:
                 detail="Cannot reset a reversed payout intent",
             )
 
+        # Not resettable, and not overridable by `force` either. Resetting an
+        # intent is how an operator gets permission to pay the claim AGAIN;
+        # doing that while the first payout's outcome is unknown is how the
+        # employee gets reimbursed twice. FAILED/EXPIRED/ABANDONED are all
+        # safe to reset because each one asserts the money did not move.
+        # INDETERMINATE asserts nothing (ADR-0007), so the only way out is
+        # `resolve_indeterminate_transfer` obtaining a real verdict — after
+        # which, if that verdict is FAILED, this method works normally.
+        if intent.status == PaymentIntentStatus.INDETERMINATE:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Cannot reset a payout whose outcome is unknown. This "
+                    "transfer was recorded INDETERMINATE because Paystack "
+                    "never confirmed what happened to it; it may still have "
+                    "moved money. It must be resolved against Paystack "
+                    "(automatically, or by an operator confirming the "
+                    "outcome) before the claim can be paid again."
+                ),
+            )
+
         if not force and intent.status not in {
             PaymentIntentStatus.ABANDONED,
             PaymentIntentStatus.FAILED,
@@ -825,6 +931,29 @@ class PaymentService:
         claim_id = coerce_uuid(expense_claim_id)
         should_commit = False
 
+        # An unresolved payout blocks a new one, unconditionally and before
+        # anything else. This is deliberately NOT folded into `active_statuses`
+        # below: that branch expires a stale intent and lets a fresh one
+        # through, and an INDETERMINATE intent is precisely the one that must
+        # never be expired away — its money may already have left (ADR-0007).
+        unresolved_intent = self.db.scalar(
+            select(PaymentIntent).where(
+                PaymentIntent.source_type == "EXPENSE_CLAIM",
+                PaymentIntent.source_id == claim_id,
+                PaymentIntent.status == PaymentIntentStatus.INDETERMINATE,
+            )
+        )
+        if unresolved_intent:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "A previous payout for this claim has an unknown outcome "
+                    f"(intent {unresolved_intent.intent_id}). It must be "
+                    "resolved against Paystack before another payout can be "
+                    "created, otherwise this claim may be paid twice."
+                ),
+            )
+
         # Check for existing active payment intent (idempotency check)
         active_statuses = [
             PaymentIntentStatus.PENDING,
@@ -858,7 +987,10 @@ class PaymentService:
 
         # Verify transfers are enabled
         transfers_enabled = resolve_value(
-            self.db, SettingDomain.payments, "paystack_transfers_enabled"
+            self.db,
+            SettingDomain.payments,
+            "paystack_transfers_enabled",
+            organization_id=self.organization_id,
         )
         if not transfers_enabled:
             raise HTTPException(
@@ -920,7 +1052,10 @@ class PaymentService:
 
         # Get transfer bank account from settings (source of funds)
         transfer_bank_account_id = resolve_value(
-            self.db, SettingDomain.payments, "paystack_transfer_bank_account_id"
+            self.db,
+            SettingDomain.payments,
+            "paystack_transfer_bank_account_id",
+            organization_id=self.organization_id,
         )
         bank_account_uuid = None
         if transfer_bank_account_id:
@@ -1110,6 +1245,11 @@ class PaymentService:
                     error=exc,
                 )
                 if result is None:
+                    # None means one thing only: Paystack ANSWERED and refused,
+                    # so the money did not move and the intent stays PENDING and
+                    # retryable. The unobserved case never reaches here — the
+                    # recovery helper settles it INDETERMINATE and raises
+                    # TransferOutcomeUnknown out of this block.
                     raise
 
         # Update intent with transfer code
@@ -1189,24 +1329,57 @@ class PaymentService:
         client: PaystackClient,
         error: PaystackError,
     ) -> Any | None:
-        """Recover from ambiguous initiate failures by verifying the reference."""
+        """Recover an ambiguous initiate failure, or settle it as unresolved.
+
+        Three outcomes, and the caller depends on the difference:
+
+        * a ``VerifyTransferResponse`` — Paystack knows the reference and told
+          us its state, so initiation did happen and the caller proceeds;
+        * ``None`` — Paystack ANSWERED that nothing started. The caller
+          re-raises the refusal and the intent stays PENDING and retryable;
+        * ``TransferOutcomeUnknown`` raised — nobody could tell us what
+          happened. The intent is INDETERMINATE and committed before this
+          leaves; the caller must not retry (ADR-0007).
+
+        The ambiguity test used to be two hard-coded strings, which is why a
+        genuine connect timeout — the commonest ambiguous initiate there is —
+        fell straight through to "return None" and left the row PENDING. It now
+        keys on the exception TYPE (``is_unobserved``) and keeps the string
+        matches for the cases where Paystack answered with an ambiguous BODY.
+        """
         error_message = str(error)
+        unobserved_attempt = is_unobserved(error)
         is_timeout = "Request timed out" in error_message
         is_duplicate_reference = "duplicate_transfer_reference" in error_message or (
             "Reference already exists on a transfer" in error_message
         )
 
-        if not (is_timeout or is_duplicate_reference):
+        if not (unobserved_attempt or is_timeout or is_duplicate_reference):
             return None
 
         try:
             verified = client.verify_transfer(intent.paystack_reference)
-        except PaystackError:
+        except PaystackError as verify_error:
             logger.warning(
                 "Failed to recover transfer initiation for intent %s after error: %s",
                 intent.intent_id,
                 error_message,
             )
+            # We asked twice. Whether "no verdict" is now permissible depends
+            # on what the two answers were.
+            #
+            # If the FIRST attempt was answered (Paystack refused it, and only
+            # a duplicate-reference string brought us here) and verification is
+            # also answered — Paystack has no transfer under this reference —
+            # then the two agree that nothing started. Retryable.
+            #
+            # Otherwise at least one leg told us nothing, and a "not found" on
+            # a reference we may have created milliseconds ago is not evidence
+            # of absence. Unobserved.
+            if unobserved_attempt or is_unobserved(verify_error):
+                raise self._record_unobserved_initiation(
+                    intent=intent, error=error
+                ) from verify_error
             return None
 
         logger.info(
@@ -1220,6 +1393,109 @@ class PaymentService:
             },
         )
         return verified
+
+    def _record_unobserved_initiation(
+        self,
+        *,
+        intent: PaymentIntent,
+        error: BaseException,
+    ) -> TransferOutcomeUnknown:
+        """Record an initiation whose outcome was never observed, and commit.
+
+        Returns the exception for the caller to raise, rather than raising it,
+        so the call site reads ``raise self._record_unobserved_initiation(...)``
+        — one statement that visibly both writes and aborts.
+
+        The commit is not optional. This runs on a path that is about to raise
+        out of the request, and without it the session unwinds and the only
+        record that a payout may be in flight is a log line.
+        """
+        message = str(error)
+        self._settle_indeterminate(
+            intent,
+            reason=message,
+            stage="initiation",
+            marker="unobserved_initiation",
+        )
+        self._commit_and_refresh(intent)
+        return TransferOutcomeUnknown(intent.intent_id, message)
+
+    def _settle_indeterminate(
+        self,
+        intent: PaymentIntent,
+        *,
+        reason: str,
+        stage: str,
+        marker: str,
+    ) -> None:
+        """Record that this transfer's outcome could not be observed.
+
+        The one place INDETERMINATE is written, so the three ways of arriving
+        at it — an initiation nobody could confirm, a poll budget spent without
+        an answer, a provider status this system cannot parse — cannot drift
+        into three different records of the same fact.
+
+        ``unresolved_since`` is set ONCE. Re-stamping it on every failed
+        re-check would reset the clock the operator alert is measured against,
+        and a transfer nobody can account for would never age.
+        """
+        already_unresolved = intent.status == PaymentIntentStatus.INDETERMINATE
+        intent.status = PaymentIntentStatus.INDETERMINATE
+        intent.unresolved_since = intent.unresolved_since or datetime.now(UTC)
+        intent.last_poll_error = reason
+        unresolved_since = intent.unresolved_since
+        intent.gateway_response = {
+            **(intent.gateway_response or {}),
+            marker: True,
+            "outcome_observed": False,
+            "unresolved_since": unresolved_since.isoformat()
+            if unresolved_since
+            else None,
+            "last_error": reason,
+        }
+        self.db.flush()
+        self._hold_batch_item_unresolved(intent, reason=reason)
+
+        if not already_unresolved:
+            observe_transfer_unresolved(stage)
+
+        logger.error(
+            "Transfer intent %s is UNRESOLVED at %s - no outcome was observed "
+            "and the payout may have moved money: %s",
+            intent.intent_id,
+            stage,
+            reason,
+            extra={
+                "intent_id": str(intent.intent_id),
+                "reference": intent.paystack_reference,
+                "organization_id": str(self.organization_id),
+                "stage": stage,
+                "unresolved_since": unresolved_since.isoformat()
+                if unresolved_since
+                else None,
+                "error": reason,
+            },
+        )
+
+    def _record_unrecognised_transfer_status(
+        self,
+        intent: PaymentIntent,
+        result: Any,
+    ) -> None:
+        """Paystack answered with a transfer status this system cannot read.
+
+        Not treated as an error of Paystack's and not retried on the fast loop:
+        asking again returns the same word. It is an observation we cannot
+        interpret, which is a non-observation, and the slow reconciler will keep
+        asking until the word becomes one we know or an operator decides.
+        """
+        reason = f"Unrecognised Paystack transfer status: {result.status!r}"
+        self._settle_indeterminate(
+            intent,
+            reason=reason,
+            stage="unrecognised_status",
+            marker="unrecognised_transfer_status",
+        )
 
     def build_transfer_result(self, intent: PaymentIntent) -> dict[str, Any]:
         """Build transfer result with claim status and user-facing message.
@@ -1243,6 +1519,16 @@ class PaymentService:
             message = "Transfer completed successfully! The expense claim has been marked as paid."
         elif intent.status == PaymentIntentStatus.FAILED:
             message = "Transfer failed. Please check the error and try again."
+        elif intent.status == PaymentIntentStatus.INDETERMINATE:
+            # Deliberately not "failed, try again": the money may have moved.
+            # The one thing the operator must not do here is retry.
+            message = (
+                "Transfer outcome is UNKNOWN. Paystack did not confirm what "
+                "happened, so this payout may or may not have gone out. Do "
+                "NOT retry it — it is being reconciled automatically, and the "
+                "claim stays approved and unpaid until a real outcome is "
+                "obtained."
+            )
         else:
             message = "Transfer initiated and is being processed. You will be notified when complete."
 
@@ -1293,12 +1579,15 @@ class PaymentService:
             logger.info(f"Transfer intent {locked_intent.intent_id} already completed")
             return
 
-        # Accept PROCESSING (normal) and PENDING (defensive: webhook arrived
-        # before the initiate route committed, or commit was lost).  Once
-        # Paystack confirms success we must honour it regardless.
+        # Accept PROCESSING (normal), PENDING (defensive: webhook arrived
+        # before the initiate route committed, or commit was lost) and
+        # INDETERMINATE (the outcome was previously unobservable and has now
+        # been observed — resolving one is the entire point of recording it).
+        # Once Paystack confirms success we must honour it regardless.
         if locked_intent.status not in (
             PaymentIntentStatus.PROCESSING,
             PaymentIntentStatus.PENDING,
+            PaymentIntentStatus.INDETERMINATE,
         ):
             raise HTTPException(
                 status_code=400,
@@ -1596,6 +1885,53 @@ class PaymentService:
             },
         )
 
+    def _hold_batch_item_unresolved(
+        self,
+        intent: PaymentIntent,
+        *,
+        reason: str,
+    ) -> None:
+        """Note an unresolved outcome on a batch item WITHOUT settling it.
+
+        `TransferBatchItemStatus` has four members and every one of them is a
+        claim: PENDING, PROCESSING, COMPLETED, FAILED. There is no member for
+        "unknown", and writing FAILED here would repeat the exact conflation
+        this change exists to remove — one level up, where it would also
+        finalize the parent batch, because `_update_batch_item_status` rolls a
+        batch to COMPLETED/FAILED/PARTIALLY_COMPLETED as soon as
+        ``completed + failed == total``.
+
+        So the item's STATUS is deliberately left where it is. That keeps the
+        batch un-finalized, which is true: a batch containing a payout nobody
+        can account for is not finished. The reason is recorded on the item so
+        the situation is visible rather than merely absent.
+
+        No new enum member and no migration: the batch tables survive only as
+        payout history (ADR-0005 §4), nothing creates batches any more, and
+        adding a fifth status to a dormant vocabulary would be inventing a
+        contract for a writer that does not exist.
+        """
+        batch_item = self.db.scalar(
+            select(TransferBatchItem).where(
+                TransferBatchItem.payment_intent_id == intent.intent_id
+            )
+        )
+        if not batch_item:
+            return
+
+        batch_item.error_message = f"UNRESOLVED: {reason}"[:500]
+        self.db.flush()
+        logger.warning(
+            "Batch item for intent %s held UNRESOLVED - its batch cannot be "
+            "finalized until the payout outcome is known",
+            intent.intent_id,
+            extra={
+                "intent_id": str(intent.intent_id),
+                "batch_item_id": str(batch_item.item_id),
+                "batch_id": str(batch_item.batch_id),
+            },
+        )
+
     def mark_transfer_failed(
         self,
         intent: PaymentIntent,
@@ -1668,16 +2004,32 @@ class PaymentService:
         if intent.direction != PaymentDirection.OUTBOUND:
             raise ValueError("Can only poll transfer status for OUTBOUND payments")
 
-        if intent.status != PaymentIntentStatus.PROCESSING:
-            logger.debug(f"Intent {intent.intent_id} not in PROCESSING state")
-            return intent
-
-        if not intent.transfer_code:
-            logger.warning(f"Intent {intent.intent_id} has no transfer_code")
+        if intent.status not in (
+            PaymentIntentStatus.PROCESSING,
+            PaymentIntentStatus.INDETERMINATE,
+        ):
+            logger.debug(f"Intent {intent.intent_id} not in a pollable state")
             return intent
 
         # Paystack's /transfer/verify/{reference} looks up by the merchant's
-        # reference (paystack_reference), NOT by the transfer_code (TRF_xxx).
+        # reference, so the REFERENCE is what is actually required here.
+        if not intent.paystack_reference:
+            logger.warning(f"Intent {intent.intent_id} has no paystack_reference")
+            return intent
+
+        # A missing transfer_code still means something went wrong for a
+        # PROCESSING intent, and it is left alone. For an INDETERMINATE one it
+        # is EXPECTED — the initiate call never came back with a code, which is
+        # precisely why nobody knows what happened — and refusing to verify
+        # would leave the intents that most need asking about permanently
+        # unasked (ADR-0007).
+        if (
+            not intent.transfer_code
+            and intent.status != PaymentIntentStatus.INDETERMINATE
+        ):
+            logger.warning(f"Intent {intent.intent_id} has no transfer_code")
+            return intent
+
         with PaystackClient(paystack_config) as client:
             result = client.verify_transfer(intent.paystack_reference)
 
@@ -1701,10 +2053,17 @@ class PaymentService:
                 gateway_response={"polled": True, "transfer_status": result.status},
                 reason=result.reason,
             )
-        else:
+        elif result.status in _PAYSTACK_IN_FLIGHT_STATUSES:
             logger.info(
                 f"Transfer {intent.transfer_code} still pending: {result.status}",
             )
+        else:
+            # An unrecognised status is not "still pending". Treating it as one
+            # is how a transfer Paystack has already settled sits in PROCESSING
+            # for twenty minutes and then gets stamped FAILED by the circuit
+            # breaker — a verdict manufactured out of a word we did not parse.
+            # We did not observe an outcome, so we say so (ADR-0007).
+            self._record_unrecognised_transfer_status(intent, result)
 
         return intent
 
@@ -1716,6 +2075,11 @@ class PaymentService:
     # FAILED itself — a second writer of `PaymentIntent.status` with no tests
     # around it. The decisions live here now; the worker only supplies the
     # sessions and aggregates what it is told.
+    #
+    # Those sessions are TENANT sessions. The selections below first ran under
+    # `cross_org_session`, which lifts only the SQLAlchemy listener and never
+    # PostgreSQL RLS — so under `app_user` they matched nothing and the poller
+    # reported a clean run forever. See ADR-0005's 2026-08-28 amendment.
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -1726,12 +2090,20 @@ class PaymentService:
     ) -> dict[UUID, list[UUID]]:
         """Outbound expense intents that expired before a transfer was started.
 
-        Selection only — the caller runs this under a cross-organization
-        session to learn WHICH tenants have work, and every decision about a
-        selected row is re-taken (and re-proved) inside that tenant's own
-        session by :meth:`expire_stale_pending_transfer`.
+        Selection only — the caller runs this inside each tenant's own session
+        (``app.tasks.expense.poll_stuck_expense_transfers`` fans out over
+        ``for_each_organization``), and every decision about a selected row is
+        re-taken, and re-proved under a lock, by
+        :meth:`expire_stale_pending_transfer`. The re-proof is not redundant
+        just because the selection now shares the session: a transfer initiated
+        between the two has already moved the row.
 
-        Returns organization id -> intent ids.
+        There is deliberately no ``organization_id`` predicate: the session is
+        the organization, and adding one here would make this method look
+        usable on an unscoped session. Returns organization id -> intent ids —
+        at most one key inside a tenant session, which is what lets the caller
+        read the mapping back by the organization it is holding and treat
+        anything else as not its to touch.
         """
         moment = now or datetime.now(UTC)
         rows = db.execute(
@@ -1760,7 +2132,8 @@ class PaymentService:
         may have left even though the row never reached PROCESSING, so they are
         reconciled rather than assumed dead.
 
-        Selection only; see :meth:`find_stale_pending_transfer_intents`.
+        Selection only, run inside the tenant's own session; see
+        :meth:`find_stale_pending_transfer_intents`.
 
         Returns organization id -> intent ids.
         """
@@ -1783,6 +2156,68 @@ class PaymentService:
         return PaymentService._group_by_organization(rows)
 
     @staticmethod
+    def find_indeterminate_transfer_intents(
+        db: Session,
+        *,
+        organization_id: UUID,
+    ) -> list[UUID]:
+        """Outbound expense transfers whose outcome was never observed.
+
+        The slow lane. `find_stuck_transfer_intents` deliberately does not see
+        these — its predicate is PENDING/PROCESSING and it carries an attempt
+        cap, so an INDETERMINATE intent drops out of the two-minute loop by
+        construction rather than by remembering to exclude it. This selector
+        replaces the cap with a separate, uncapped predicate: an unresolved
+        payout is asked about for as long as it stays unresolved, because no
+        quantity of elapsed time converts "we do not know" into a verdict.
+
+        Selection only; every decision is re-taken and re-proved under a lock in
+        :meth:`resolve_indeterminate_transfer`. The organization is mandatory:
+        the scheduler discovers tenant identifiers through the narrow tenant
+        catalogue and performs this read inside that tenant's own RLS session.
+        """
+        return list(
+            db.scalars(
+                select(PaymentIntent.intent_id)
+                .where(
+                    PaymentIntent.organization_id == organization_id,
+                    PaymentIntent.direction == PaymentDirection.OUTBOUND,
+                    PaymentIntent.status == PaymentIntentStatus.INDETERMINATE,
+                    PaymentIntent.source_type == "EXPENSE_CLAIM",
+                )
+                .order_by(PaymentIntent.unresolved_since.asc())
+            ).all()
+        )
+
+    @staticmethod
+    def oldest_unresolved_transfer_age(
+        db: Session,
+        *,
+        organization_id: UUID,
+        now: datetime | None = None,
+    ) -> timedelta:
+        """Age of this tenant's longest-unresolved payout, or zero.
+
+        The caller aggregates the maximum across tenant-scoped reads. Keeping
+        the organization argument mandatory prevents this metric helper from
+        becoming a new cross-tenant read path.
+        """
+        moment = now or datetime.now(UTC)
+        oldest = db.scalar(
+            select(func.min(PaymentIntent.unresolved_since)).where(
+                PaymentIntent.organization_id == organization_id,
+                PaymentIntent.direction == PaymentDirection.OUTBOUND,
+                PaymentIntent.status == PaymentIntentStatus.INDETERMINATE,
+                PaymentIntent.unresolved_since.isnot(None),
+            )
+        )
+        if oldest is None:
+            return timedelta(0)
+        if oldest.tzinfo is None:
+            oldest = oldest.replace(tzinfo=UTC)
+        return max(moment - oldest, timedelta(0))
+
+    @staticmethod
     def _group_by_organization(rows) -> dict[UUID, list[UUID]]:
         grouped: dict[UUID, list[UUID]] = {}
         for intent_id, organization_id in rows:
@@ -1800,13 +2235,22 @@ class PaymentService:
         not belong in a single-writer fix.
         """
         secret_key = resolve_value(
-            self.db, SettingDomain.payments, "paystack_secret_key"
+            self.db,
+            SettingDomain.payments,
+            "paystack_secret_key",
+            organization_id=self.organization_id,
         )
         public_key = resolve_value(
-            self.db, SettingDomain.payments, "paystack_public_key"
+            self.db,
+            SettingDomain.payments,
+            "paystack_public_key",
+            organization_id=self.organization_id,
         )
         webhook_secret = resolve_value(
-            self.db, SettingDomain.payments, "paystack_webhook_secret"
+            self.db,
+            SettingDomain.payments,
+            "paystack_webhook_secret",
+            organization_id=self.organization_id,
         )
         if not secret_key or not public_key:
             return None
@@ -1949,7 +2393,7 @@ class PaymentService:
         except Exception as exc:  # noqa: BLE001 - recorded, never re-raised
             return self._record_transfer_poll_failure(
                 intent=intent,
-                error_message=str(exc),
+                error=exc,
                 max_poll_attempts=max_poll_attempts,
             )
 
@@ -1957,6 +2401,11 @@ class PaymentService:
             outcome = TransferPollOutcome.COMPLETED
         elif intent.status == PaymentIntentStatus.FAILED:
             outcome = TransferPollOutcome.FAILED
+        elif intent.status == PaymentIntentStatus.REVERSED:
+            outcome = TransferPollOutcome.REVERSED
+        elif intent.status == PaymentIntentStatus.INDETERMINATE:
+            # poll_transfer_status parsed a status it does not recognise.
+            outcome = TransferPollOutcome.INDETERMINATE
         else:
             outcome = TransferPollOutcome.STILL_PENDING
 
@@ -1966,23 +2415,219 @@ class PaymentService:
             poll_count=intent.poll_count,
         )
 
+    def resolve_transfer_unresolved_alert_threshold(self) -> timedelta:
+        """How long a payout may stay unresolved before an operator is told.
+
+        Config, not a constant: a deployment whose treasury desk works Lagos
+        hours wants a different number from one that does not, and neither
+        should have to patch code to say so. The spec's default (six hours) is
+        the documented answer; the module constant is only the floor under a
+        settings layer that cannot answer at all.
+        """
+        raw = resolve_value(
+            self.db,
+            SettingDomain.payments,
+            "paystack_transfer_unresolved_alert_hours",
+            organization_id=self.organization_id,
+        )
+        try:
+            hours = int(str(raw))
+        except (TypeError, ValueError):
+            hours = TRANSFER_UNRESOLVED_ALERT_HOURS_DEFAULT
+        if hours < 1:
+            hours = TRANSFER_UNRESOLVED_ALERT_HOURS_DEFAULT
+        return timedelta(hours=hours)
+
+    def resolve_indeterminate_transfer(
+        self,
+        intent_id: UUID,
+        paystack_config: PaystackConfig,
+        *,
+        now: datetime | None = None,
+    ) -> TransferPollResult:
+        """Ask Paystack again about one payout whose outcome is unknown.
+
+        **The only writer permitted to move an intent OUT of INDETERMINATE**,
+        and it may only move it to a status Paystack itself justified —
+        COMPLETED, FAILED or REVERSED — by delegating to the same three methods
+        the webhook and the fast poller use. There is deliberately no "give up"
+        branch and no attempt cap: a budget here would recreate the defect one
+        level up, manufacturing a verdict out of repeated silence.
+
+        Same shape as `reconcile_stuck_transfer` and for the same reason
+        (ADR-0005 section 3): the premise was established by a selection in
+        another session, so the row is taken by id, locked ``FOR UPDATE`` with
+        ``populate_existing=True``, and re-proved to still be INDETERMINATE
+        before anything is written. An intent a webhook resolved in the gap is
+        reported, never overwritten.
+
+        Never raises for a poll failure - the caller is a batch job.
+        """
+        moment = now or datetime.now(UTC)
+        intent = self._lock_transfer_intent(intent_id)
+        if intent is None:
+            return TransferPollResult(
+                intent_id=coerce_uuid(intent_id),
+                outcome=TransferPollOutcome.SKIPPED,
+                poll_count=0,
+                error="intent not found in this organization",
+            )
+
+        if intent.status != PaymentIntentStatus.INDETERMINATE:
+            logger.info(
+                "Skipped resolving intent %s - no longer unresolved (status=%s)",
+                intent.intent_id,
+                intent.status.value,
+            )
+            return TransferPollResult(
+                intent_id=intent.intent_id,
+                outcome=TransferPollOutcome.SKIPPED,
+                poll_count=intent.poll_count,
+                error=f"already resolved as {intent.status.value}",
+            )
+
+        if not intent.paystack_reference:
+            # Nothing to ask about. This should not be reachable - an intent
+            # only becomes INDETERMINATE after a reference was sent - and it is
+            # reported rather than settled, because "we have no way to ask" is
+            # itself an unobserved outcome, not a verdict.
+            return self._report_still_unresolved(
+                intent, moment, "no reference to verify against"
+            )
+
+        intent.poll_count += 1
+
+        try:
+            self.poll_transfer_status(intent, paystack_config)
+        except Exception as exc:  # noqa: BLE001 - recorded, never re-raised
+            intent.last_poll_error = str(exc)
+            self.db.flush()
+            return self._report_still_unresolved(intent, moment, str(exc))
+
+        if intent.status == PaymentIntentStatus.COMPLETED:
+            outcome = TransferPollOutcome.COMPLETED
+        elif intent.status == PaymentIntentStatus.FAILED:
+            outcome = TransferPollOutcome.FAILED
+        elif intent.status == PaymentIntentStatus.REVERSED:
+            outcome = TransferPollOutcome.REVERSED
+        else:
+            # Still INDETERMINATE: Paystack was reached but said nothing this
+            # system can turn into a verdict.
+            return self._report_still_unresolved(
+                intent, moment, intent.last_poll_error or "no verdict from Paystack"
+            )
+
+        # A resolved intent is no longer unresolved, and leaving the timestamp
+        # behind would keep it in the alert query forever.
+        intent.unresolved_since = None
+        self.db.flush()
+        logger.info(
+            "Resolved previously unresolved transfer %s as %s after %d attempts",
+            intent.intent_id,
+            intent.status.value,
+            intent.poll_count,
+            extra={
+                "intent_id": str(intent.intent_id),
+                "resolved_as": intent.status.value,
+            },
+        )
+        return TransferPollResult(
+            intent_id=intent.intent_id,
+            outcome=outcome,
+            poll_count=intent.poll_count,
+        )
+
+    def _report_still_unresolved(
+        self,
+        intent: PaymentIntent,
+        now: datetime,
+        reason: str,
+    ) -> TransferPollResult:
+        """Still no verdict. Escalate once the intent is older than the threshold.
+
+        Escalation is a log record at ERROR carrying the intent, the reference,
+        the amount and how long it has been unknown - the fields an operator
+        needs in order to go and look at Paystack themselves. It deliberately
+        does not create a Notification: a notification needs a named recipient,
+        and guessing one for a treasury exception would either spam every admin
+        or silently reach nobody. The alerting rule keys on this log line and on
+        ``payment_transfer_unresolved_oldest_age_seconds``.
+        """
+        threshold = self.resolve_transfer_unresolved_alert_threshold()
+        unresolved_since = intent.unresolved_since
+        if unresolved_since is not None and unresolved_since.tzinfo is None:
+            unresolved_since = unresolved_since.replace(tzinfo=UTC)
+        age = (now - unresolved_since) if unresolved_since else timedelta(0)
+
+        if age >= threshold:
+            logger.error(
+                "ESCALATION: transfer %s has had an unknown outcome for %s "
+                "(threshold %s). A human must confirm with Paystack whether "
+                "%s %s left the account. Reference %s.",
+                intent.intent_id,
+                age,
+                threshold,
+                intent.currency_code,
+                intent.amount,
+                intent.paystack_reference,
+                extra={
+                    "intent_id": str(intent.intent_id),
+                    "organization_id": str(self.organization_id),
+                    "reference": intent.paystack_reference,
+                    "amount": str(intent.amount),
+                    "currency": intent.currency_code,
+                    "unresolved_for_seconds": int(age.total_seconds()),
+                    "threshold_seconds": int(threshold.total_seconds()),
+                    "needs_operator": True,
+                },
+            )
+        else:
+            logger.warning(
+                "Transfer %s still unresolved after %s: %s",
+                intent.intent_id,
+                age,
+                reason,
+            )
+
+        return TransferPollResult(
+            intent_id=intent.intent_id,
+            outcome=TransferPollOutcome.STILL_UNRESOLVED,
+            poll_count=intent.poll_count,
+            error=reason,
+        )
+
     def _record_transfer_poll_failure(
         self,
         *,
         intent: PaymentIntent,
-        error_message: str,
+        error: BaseException,
         max_poll_attempts: int,
     ) -> TransferPollResult:
-        """Record a failed poll attempt, and give up once the budget is spent.
+        """Record a failed poll attempt, and stop the fast loop once spent.
 
-        Giving up writes FAILED directly rather than going through
-        `mark_transfer_failed`. That is the behaviour this path already had and
-        it is kept deliberately: `mark_transfer_failed` also reverts a PAID
-        claim and replaces `gateway_response`, and "we could not reach Paystack
-        ten times" is not the same claim as "Paystack told us this failed".
-        Whether an unreachable transfer should be settled as FAILED at all is a
-        real question, and not one to answer inside a single-writer fix.
+        Spending the attempt budget ends the POLLING, and that is all it ends.
+        What the intent becomes depends on what the last attempt actually
+        learned, and there are only two possibilities:
+
+        * **Paystack answered and refused** — a parsed ``status: false`` body,
+          a 4xx. That is a verdict about this transfer, so FAILED is the honest
+          record and the claim goes back to being payable.
+
+        * **Nothing was learned** — a timeout, a connection error, a 5xx, an
+          exception out of our own posting code. FAILED here would be a claim
+          this system is not entitled to make: "we could not reach Paystack ten
+          times" is not "Paystack told us this failed", and every downstream
+          reader — the reset endpoint, the reimburse button, the operator
+          reading a rose badge — acts on the difference. The intent becomes
+          INDETERMINATE, keeps the money-may-have-moved semantics, and is
+          handed to `resolve_indeterminate_transfer` (ADR-0007, adopting
+          `dotmac_starter_mt` ADR-0032).
+
+        The FAILED write stays here rather than going through
+        `mark_transfer_failed`, unchanged from the single-writer fix: that
+        method also reverts a PAID claim and replaces `gateway_response`.
         """
+        error_message = str(error)
         intent.last_poll_error = error_message
         logger.error(
             "Failed to poll transfer %s (attempt %d/%d): %s",
@@ -2000,6 +2645,25 @@ class PaymentService:
                 error=error_message,
             )
 
+        if is_unobserved(error):
+            self._settle_indeterminate(
+                intent,
+                reason=error_message,
+                stage="polling",
+                marker="poll_abandoned_unobserved",
+            )
+            intent.gateway_response = {
+                **(intent.gateway_response or {}),
+                "poll_attempts": intent.poll_count,
+            }
+            self.db.flush()
+            return TransferPollResult(
+                intent_id=intent.intent_id,
+                outcome=TransferPollOutcome.INDETERMINATE,
+                poll_count=intent.poll_count,
+                error=error_message,
+            )
+
         intent.status = PaymentIntentStatus.FAILED
         intent.gateway_response = {
             **(intent.gateway_response or {}),
@@ -2009,7 +2673,8 @@ class PaymentService:
         }
         self.db.flush()
         logger.warning(
-            "Transfer %s marked FAILED after %d poll attempts: %s",
+            "Transfer %s marked FAILED after %d poll attempts - Paystack "
+            "answered and refused: %s",
             intent.intent_id,
             intent.poll_count,
             error_message,
@@ -2046,10 +2711,15 @@ class PaymentService:
             logger.info(f"Transfer intent {intent.intent_id} already reversed")
             return
 
-        # Can only reverse COMPLETED or PROCESSING transfers
+        # Can only reverse COMPLETED, PROCESSING or INDETERMINATE transfers.
+        # INDETERMINATE belongs here for the same reason it belongs in
+        # `process_successful_transfer`: a reversal notice IS the observation
+        # that was missing, and it says the money moved and came back. Refusing
+        # it would strand the intent unresolved forever.
         if intent.status not in [
             PaymentIntentStatus.COMPLETED,
             PaymentIntentStatus.PROCESSING,
+            PaymentIntentStatus.INDETERMINATE,
         ]:
             logger.warning(
                 f"Cannot reverse intent {intent.intent_id} with status '{intent.status.value}'"

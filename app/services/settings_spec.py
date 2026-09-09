@@ -682,6 +682,26 @@ SETTINGS_SPECS: list[SettingSpec] = [
         value_type=SettingValueType.string,
         default=None,
     ),
+    # How long a transfer may sit INDETERMINATE (outcome unobserved) before the
+    # reconciler escalates it to an operator. Six hours is one Nigerian banking
+    # business half-day: long enough that a Paystack incident or a NIBSS
+    # settlement delay resolves itself without paging anyone, short enough that
+    # unresolved money is on someone's desk the same day it went unresolved.
+    # Not a retry budget — nothing is retried on this clock; it is purely when
+    # "we do not know" stops being tolerable to leave alone (ADR-0007).
+    SettingSpec(
+        domain=SettingDomain.payments,
+        key="paystack_transfer_unresolved_alert_hours",
+        env_var="PAYSTACK_TRANSFER_UNRESOLVED_ALERT_HOURS",
+        value_type=SettingValueType.integer,
+        default=6,
+        min_value=1,
+        label="Unresolved Transfer Alert Threshold (hours)",
+        description=(
+            "How long an outbound transfer may stay INDETERMINATE — outcome "
+            "not observed — before it is escalated as needing a human."
+        ),
+    ),
     # Banking Domain Settings (Mono Connect Integration)
     SettingSpec(
         domain=SettingDomain.banking,

@@ -9,12 +9,14 @@ import logging
 import time
 from dataclasses import dataclass
 from typing import Any
+from uuid import UUID
 
 import httpx
 from sqlalchemy.orm import Session
 
 from app.models.domain_settings import SettingDomain
 from app.metrics import categorize_http_status, observe_integration_request
+from app.services.domain_settings import AMBIENT, _Ambient
 
 logger = logging.getLogger(__name__)
 
@@ -48,12 +50,20 @@ class NextcloudConfig:
     timeout: float = 30.0
 
     @classmethod
-    def from_db(cls, db: Session) -> "NextcloudConfig":
+    def from_db(
+        cls,
+        db: Session,
+        *,
+        organization_id: "UUID | None | _Ambient" = AMBIENT,
+    ) -> "NextcloudConfig":
         """Load Nextcloud config from domain settings."""
         from app.services.settings_spec import resolve_value
 
         server_url = resolve_value(
-            db, SettingDomain.notifications, "nextcloud_server_url"
+            db,
+            SettingDomain.notifications,
+            "nextcloud_server_url",
+            organization_id=organization_id,
         )
         if not server_url:
             raise ValueError(
@@ -61,13 +71,28 @@ class NextcloudConfig:
             )
 
         username = (
-            resolve_value(db, SettingDomain.notifications, "nextcloud_username") or ""
+            resolve_value(
+                db,
+                SettingDomain.notifications,
+                "nextcloud_username",
+                organization_id=organization_id,
+            )
+            or ""
         )
         password = (
-            resolve_value(db, SettingDomain.notifications, "nextcloud_password") or ""
+            resolve_value(
+                db,
+                SettingDomain.notifications,
+                "nextcloud_password",
+                organization_id=organization_id,
+            )
+            or ""
         )
         raw_timeout = resolve_value(
-            db, SettingDomain.notifications, "nextcloud_request_timeout"
+            db,
+            SettingDomain.notifications,
+            "nextcloud_request_timeout",
+            organization_id=organization_id,
         )
 
         return cls(
@@ -78,13 +103,32 @@ class NextcloudConfig:
         )
 
 
-def is_configured(db: Session) -> bool:
+def is_configured(
+    db: Session,
+    *,
+    organization_id: "UUID | None | _Ambient" = AMBIENT,
+) -> bool:
     """Return True if Nextcloud Talk integration is configured."""
     from app.services.settings_spec import resolve_value
 
-    server_url = resolve_value(db, SettingDomain.notifications, "nextcloud_server_url")
-    username = resolve_value(db, SettingDomain.notifications, "nextcloud_username")
-    password = resolve_value(db, SettingDomain.notifications, "nextcloud_password")
+    server_url = resolve_value(
+        db,
+        SettingDomain.notifications,
+        "nextcloud_server_url",
+        organization_id=organization_id,
+    )
+    username = resolve_value(
+        db,
+        SettingDomain.notifications,
+        "nextcloud_username",
+        organization_id=organization_id,
+    )
+    password = resolve_value(
+        db,
+        SettingDomain.notifications,
+        "nextcloud_password",
+        organization_id=organization_id,
+    )
     return bool(server_url and username and password)
 
 
@@ -101,9 +145,14 @@ class NextcloudTalkClient:
         }
 
     @classmethod
-    def from_db(cls, db: Session) -> "NextcloudTalkClient":
+    def from_db(
+        cls,
+        db: Session,
+        *,
+        organization_id: "UUID | None | _Ambient" = AMBIENT,
+    ) -> "NextcloudTalkClient":
         """Create a client using settings from the database."""
-        return cls(NextcloudConfig.from_db(db))
+        return cls(NextcloudConfig.from_db(db, organization_id=organization_id))
 
     def _request(
         self,

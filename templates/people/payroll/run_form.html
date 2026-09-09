@@ -32,7 +32,7 @@
                 <p class="text-sm text-sky-700 dark:text-sky-300 mt-0.5">
                     {{ copy_from.payroll_frequency.value | title }}
                     {% if copy_from.department %} &bull; {{ copy_from.department.department_name }}{% endif %}
-                    {% if copy_from.employment_type %} &bull; {{ copy_from.employment_type.type_name }}{% endif %}
+                    {% if copy_employment_type %} &bull; {{ copy_employment_type.type_name }}{% endif %}
                     &mdash; dates advanced to next period. Review and adjust before saving.
                 </p>
             </div>

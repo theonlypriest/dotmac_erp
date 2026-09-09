@@ -6,7 +6,7 @@ Records each migration/sync execution for audit and monitoring.
 
 import enum
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import DateTime, Enum, ForeignKey, Index, Integer, String, func, text
@@ -14,6 +14,11 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
+
+try:
+    from datetime import UTC  # type: ignore[attr-defined]
+except ImportError:  # pragma: no cover
+    UTC = timezone.utc  # type: ignore[assignment]
 
 
 class SyncType(str, enum.Enum):
@@ -90,6 +95,9 @@ class SyncHistory(Base):
     completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    last_activity_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # Statistics
     total_records: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -114,12 +122,18 @@ class SyncHistory(Base):
 
     def start(self) -> None:
         """Mark job as started."""
+        now = datetime.now(UTC)
         self.status = SyncJobStatus.RUNNING
-        self.started_at = datetime.now()
+        self.started_at = now
+        self.last_activity_at = now
+
+    def touch(self) -> None:
+        """Record progress so maintenance can distinguish live and abandoned jobs."""
+        self.last_activity_at = datetime.now(UTC)
 
     def complete(self) -> None:
         """Mark job as completed."""
-        self.completed_at = datetime.now()
+        self.completed_at = datetime.now(UTC)
         if self.error_count > 0:
             self.status = SyncJobStatus.COMPLETED_WITH_ERRORS
         else:
@@ -128,13 +142,13 @@ class SyncHistory(Base):
     def fail(self, error: str) -> None:
         """Mark job as failed."""
         self.status = SyncJobStatus.FAILED
-        self.completed_at = datetime.now()
+        self.completed_at = datetime.now(UTC)
         self.add_error("system", "system", error)
 
     def cancel(self) -> None:
         """Mark job as cancelled."""
         self.status = SyncJobStatus.CANCELLED
-        self.completed_at = datetime.now()
+        self.completed_at = datetime.now(UTC)
 
     def add_error(self, doctype: str, name: str, error: str) -> None:
         """Add error to error list (capped at 100)."""

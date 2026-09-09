@@ -505,6 +505,88 @@ def test_request_sends_api_key_header_not_bearer() -> None:
     assert seen["authorization"] == ""
 
 
+@pytest.mark.parametrize(
+    ("status_code", "expected"),
+    [
+        (
+            422,
+            "Department is not mapped in Self-Care. Map this ERP department first.",
+        ),
+        (
+            409,
+            "ERP employee is already linked to a different Self-Care user.",
+        ),
+    ],
+)
+def test_department_sync_permanent_errors_are_clear(
+    status_code: int, expected: str
+) -> None:
+    import httpx as _httpx
+
+    from app.services.dotmac_sub.client import (
+        DotmacSubClient,
+        DotmacSubConfig,
+        DotmacSubPermanentSyncError,
+    )
+
+    client = DotmacSubClient(DotmacSubConfig(api_url="https://x", api_token="svc-key"))
+    response = _httpx.Response(status_code, json={"detail": "Self-Care detail"})
+
+    with pytest.raises(DotmacSubPermanentSyncError, match=expected):
+        client._handle_response(
+            response, endpoint="/staff-accounts/acc-9/erp-department"
+        )
+
+
+def test_department_sync_forbidden_error_identifies_missing_scope() -> None:
+    import httpx as _httpx
+
+    from app.services.dotmac_sub.client import (
+        DotmacSubClient,
+        DotmacSubConfig,
+        DotmacSubPermanentSyncError,
+    )
+
+    client = DotmacSubClient(DotmacSubConfig(api_url="https://x", api_token="svc-key"))
+    response = _httpx.Response(403, json={"detail": "forbidden"})
+
+    with pytest.raises(
+        DotmacSubPermanentSyncError,
+        match="operations:service_team:membership",
+    ):
+        client._handle_response(
+            response, endpoint="/staff-accounts/acc-9/erp-department"
+        )
+
+
+def test_staff_role_rejection_points_to_selfcare_role_catalog() -> None:
+    import httpx as _httpx
+
+    from app.services.dotmac_sub.client import (
+        DotmacSubClient,
+        DotmacSubConfig,
+        DotmacSubPermanentSyncError,
+    )
+
+    client = DotmacSubClient(DotmacSubConfig(api_url="https://x", api_token="svc-key"))
+    response = _httpx.Response(
+        422,
+        json={
+            "detail": {
+                "code": "auth.staff_provisioning.unknown_roles",
+                "message": "One or more requested roles are not active.",
+                "details": {"role_names": ["field_technician"]},
+            }
+        },
+    )
+
+    with pytest.raises(
+        DotmacSubPermanentSyncError,
+        match="dotmac_sub_roles exist and are active",
+    ):
+        client._handle_response(response, endpoint="/staff-accounts/acc-9/roles")
+
+
 def test_lock_dotmac_sub_customer_issues_advisory_lock_on_postgres() -> None:
     """RC1/I-5: the customer upsert serializes on (org, dotmac_sub_id) so the
     batch sync and the on-demand resolve can't both create a customer."""

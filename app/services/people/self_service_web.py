@@ -3516,6 +3516,10 @@ class SelfServiceWebService:
         db: Session,
         *,
         status: str | None = None,
+        decision: str | None = None,
+        employee_id: UUID | None = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
         page: int = 1,
     ) -> HTMLResponse:
         org_id = coerce_uuid(auth.organization_id)
@@ -3528,27 +3532,35 @@ class SelfServiceWebService:
                     request,
                     auth,
                     db,
-                    "My Approvals",
-                    "self-my-approvals",
+                    "Team Expenses",
+                    "self-team-expenses",
                     detail=exc.detail,
                 )
             raise
 
-        report_data = ExpenseService(db, auth).get_my_approvals_report(
-            org_id,
-            approver_id=approver_employee_id,
-        )
+        normalized_status = status.upper() if status else None
+        normalized_decision = decision.upper() if decision else None
+        try:
+            report_data = ExpenseService(db, auth).get_my_approvals_report(
+                org_id,
+                approver_id=approver_employee_id,
+                start_date=start_date,
+                end_date=end_date,
+                decision=normalized_decision,
+                claim_status=normalized_status,
+                employee_id=employee_id,
+                include_pending=True,
+                filter_by_claim_date=True,
+                use_default_date_range=False,
+                limit=1000,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         decisions = report_data["decisions"]
         if status:
-            status = status.upper()
-            if status not in {"APPROVED", "REJECTED"}:
-                raise HTTPException(status_code=400, detail="Invalid status")
-            action_filter = status
-            decisions = [
-                d
-                for d in decisions
-                if d.get("action_type", "").upper() == action_filter
-            ]
+            normalized_status = status.upper()
+        if decision:
+            normalized_decision = decision.upper()
 
         pagination = PaginationParams.from_page(page, per_page=20)
         total = len(decisions)
@@ -3570,14 +3582,50 @@ class SelfServiceWebService:
             }
 
         context = base_context(
-            request, auth, "My Approvals", "self-my-approvals", db=db
+            request, auth, "Team Expenses", "self-team-expenses", db=db
         )
-        active_filters = build_active_filters(params={"status": status})
+        status_options = [
+            ExpenseClaimStatus.SUBMITTED.value,
+            ExpenseClaimStatus.PENDING_APPROVAL.value,
+            ExpenseClaimStatus.APPROVED.value,
+            ExpenseClaimStatus.REJECTED.value,
+            ExpenseClaimStatus.PAID.value,
+            ExpenseClaimStatus.CANCELLED.value,
+        ]
+        employee_options = report_data["employee_options"]
+        active_filters = build_active_filters(
+            params={
+                "decision": normalized_decision,
+                "status": normalized_status,
+                "employee_id": str(employee_id) if employee_id else None,
+                "start_date": start_date.isoformat() if start_date else None,
+                "end_date": end_date.isoformat() if end_date else None,
+            },
+            labels={
+                "decision": "Decision",
+                "status": "Status",
+                "employee_id": "Employee",
+                "start_date": "From",
+                "end_date": "To",
+            },
+            options={
+                "employee_id": {
+                    option["employee_id"]: option["name"] for option in employee_options
+                }
+            },
+        )
         context.update(
             {
                 "approvals": items,
-                "status": status,
-                "statuses": ["APPROVED", "REJECTED"],
+                "status": normalized_status,
+                "decision": normalized_decision,
+                "employee_id": employee_id,
+                "selected_employee_id": str(employee_id) if employee_id else "",
+                "start_date": start_date,
+                "end_date": end_date,
+                "statuses": status_options,
+                "decisions": ["PENDING", "APPROVED", "REJECTED"],
+                "employee_options": employee_options,
                 "page": page,
                 "total_pages": total_pages,
                 "total": total,
@@ -3587,8 +3635,12 @@ class SelfServiceWebService:
                 "summary": {
                     "approved_count": report_data["approved_count"],
                     "rejected_count": report_data["rejected_count"],
+                    "pending_count": report_data["pending_count"],
+                    "paid_count": report_data["paid_count"],
                     "approved_total": report_data["approved_total"],
                     "rejected_total": report_data["rejected_total"],
+                    "pending_total": report_data["pending_total"],
+                    "paid_total": report_data["paid_total"],
                 },
                 "active_filters": active_filters,
                 "success": request.query_params.get("success"),

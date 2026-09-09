@@ -6,7 +6,7 @@
 <nav class="text-sm text-slate-500 dark:text-slate-400" aria-label="Breadcrumb">
     <ol class="flex">
         <li><a href="/dashboard" class="hover:text-teal-600 dark:hover:text-teal-400 transition-colors">Dashboard</a></li>
-        <li class="flex items-center"><span class="mx-2">/</span> <a href="/people/self/attendance" class="hover:text-teal-600 dark:hover:text-teal-400 transition-colors">Self Service</a></li>
+        <li class="flex items-center"><span class="mx-2">/</span> <a href="/people/self" class="hover:text-teal-600 dark:hover:text-teal-400 transition-colors">Self Service</a></li>
         <li class="flex items-center"><span class="mx-2">/</span> <a href="/people/self/expenses" class="hover:text-teal-600 dark:hover:text-teal-400 transition-colors">My Expenses</a></li>
         <li class="flex items-center"><span class="mx-2">/</span> <span class="text-slate-900 dark:text-white" aria-current="page">Edit Claim</span></li>
     </ol>
@@ -239,8 +239,14 @@
                                    name="description_{{ item.item_id }}"
                                    value="{{ item.description }}"
                                    class="form-input w-full"
+                                   maxlength="500"
+                                   aria-describedby="description_{{ item.item_id }}_counter"
+                                   data-expense-description
                                    required
                                    {% if not can_edit %}disabled{% endif %}>
+                            <p id="description_{{ item.item_id }}_counter" class="field-help mt-1 text-xs" aria-live="polite">
+                                <span data-description-count>{{ item.description|length }}</span> / 500 characters
+                            </p>
                         </td>
                         <td class="px-4 py-3 text-right">
                             <input aria-label="Amount" type="number"
@@ -310,7 +316,13 @@
             <input aria-label="Description" type="text"
                    name="description___KEY__"
                    class="form-input w-full"
+                   maxlength="500"
+                   aria-describedby="description___KEY___counter"
+                   data-expense-description
                    required>
+            <p id="description___KEY___counter" class="field-help mt-1 text-xs" aria-live="polite">
+                <span data-description-count>0</span> / 500 characters
+            </p>
         </td>
         <td class="px-4 py-3 text-right">
             <input aria-label="Amount" type="number"
@@ -347,6 +359,18 @@
         const itemTemplate = document.getElementById("expense-item-template");
         const tableBody = document.querySelector("tbody");
         const form = document.querySelector('form[action$="/edit"]');
+
+        const updateDescriptionCount = (input) => {
+            const cell = input.closest("td");
+            const count = cell ? cell.querySelector("[data-description-count]") : null;
+            if (count) {
+                count.textContent = String(input.value.length);
+            }
+        };
+
+        document.querySelectorAll("[data-expense-description]").forEach(
+            updateDescriptionCount,
+        );
         const bankCodesByName = new Map([
             {% for bank in allowed_banks %}
             [{{ bank.bank_name|tojson }}, {{ bank.bank_sort_code|tojson }}],
@@ -397,6 +421,12 @@
         }
 
         if (tableBody) {
+            tableBody.addEventListener("input", (event) => {
+                if (event.target.matches("[data-expense-description]")) {
+                    updateDescriptionCount(event.target);
+                }
+            });
+
             tableBody.addEventListener("click", (event) => {
                 const removeButton = event.target.closest("[data-remove-new-item]");
                 if (!removeButton) return;

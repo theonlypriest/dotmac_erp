@@ -778,7 +778,10 @@ class PaymentSyncMixin:
         return PaymentMethod.BANK_TRANSFER
 
     def post_unposted_payments(
-        self, created_by_user_id: UUID | None = None
+        self,
+        created_by_user_id: UUID | None = None,
+        *,
+        limit: int | None = None,
     ) -> dict[str, Any]:
         """Post CLEARED dotmac_sub payments to the GL — standard AR behaviour.
 
@@ -799,6 +802,8 @@ class PaymentSyncMixin:
             CustomerPayment.journal_entry_id.is_(None),
             CustomerPayment.dotmac_sub_id.is_not(None),
         )
+        if limit is not None:
+            stmt = stmt.limit(max(limit, 1))
         for payment in self.db.scalars(stmt).all():
             savepoint = self.db.begin_nested()
             try:

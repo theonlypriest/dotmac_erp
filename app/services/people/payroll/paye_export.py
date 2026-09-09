@@ -20,13 +20,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
 from app.models.finance.core_org.organization import Organization
-from app.models.people.hr.employee import Employee
 from app.models.people.payroll.employee_tax_profile import EmployeeTaxProfile
 from app.models.people.payroll.salary_slip import (
     SalarySlip,
     SalarySlipDeduction,
     SalarySlipEarning,
     SalarySlipStatus,
+)
+from app.services.people.payroll.employment_type_classification import (
+    classify_payroll_employment_type,
 )
 
 logger = logging.getLogger(__name__)
@@ -132,7 +134,7 @@ class PAYEExportService:
         stmt = (
             select(SalarySlip)
             .options(
-                joinedload(SalarySlip.employee).joinedload(Employee.employment_type),
+                joinedload(SalarySlip.employee),
                 joinedload(SalarySlip.earnings).joinedload(SalarySlipEarning.component),
                 joinedload(SalarySlip.deductions).joinedload(
                     SalarySlipDeduction.component
@@ -468,15 +470,6 @@ class PAYEExportService:
             return ""
         return str(value).strip().lower()
 
-    @staticmethod
-    def _is_permanent_staff(employee) -> bool:
-        employment_type = getattr(employee, "employment_type", None)
-        type_code = str(getattr(employment_type, "type_code", "") or "").strip().lower()
-        type_name = str(getattr(employment_type, "type_name", "") or "").strip().lower()
-        permanent_codes = {"permanent", "full_time", "full-time", "fulltime"}
-        permanent_names = {"permanent", "full time", "full-time", "fulltime"}
-        return type_code in permanent_codes or type_name in permanent_names
-
     def _employee_matches_tax_jurisdiction(
         self,
         tax_profile: EmployeeTaxProfile | None,
@@ -500,9 +493,14 @@ class PAYEExportService:
         tax_profile: EmployeeTaxProfile | None,
         paye_format: PAYEFormat,
     ) -> bool:
-        return self._is_permanent_staff(
-            employee
-        ) and self._employee_matches_tax_jurisdiction(tax_profile, paye_format)
+        classification = classify_payroll_employment_type(
+            self.db,
+            organization_id=employee.organization_id,
+            employment_type_id=employee.employment_type_id,
+        )
+        return classification.is_permanent and self._employee_matches_tax_jurisdiction(
+            tax_profile, paye_format
+        )
 
     @staticmethod
     def _get_tax_profile_for_employee(

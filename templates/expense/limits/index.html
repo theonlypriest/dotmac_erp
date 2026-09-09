@@ -1,0 +1,48 @@
+{% extends "expense/base_expense.html" %}
+{% from "components/macros.html" import icon_svg %}
+
+{% block page_title %}Spending Limits{% endblock %}
+
+{% block breadcrumbs %}
+<nav class="text-sm text-slate-500 mt-1" aria-label="Breadcrumb">
+    <ol class="flex items-center gap-2">
+        <li><a href="/expense" class="hover:text-slate-700 dark:hover:text-slate-300">Expense</a></li>
+        <li class="flex items-center gap-2">{{ icon_svg("chevron-right", "h-4 w-4") }} <span class="text-slate-700 dark:text-slate-300" aria-current="page">Spending Limits</span></li>
+    </ol>
+</nav>
+{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+    <div>
+        <h1 class="text-2xl font-semibold text-slate-900 dark:text-white font-display">Spending Limits</h1>
+        <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Choose the limit configuration area to manage.</p>
+    </div>
+
+    <div class="grid gap-4 md:grid-cols-2">
+        <a href="/expense/limits/rules" class="card card-hover p-5 group">
+            <div class="flex items-start gap-4">
+                <div class="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400">
+                    {{ icon_svg("clipboard-list", "h-5 w-5") }}
+                </div>
+                <div class="min-w-0">
+                    <h2 class="text-base font-semibold text-slate-900 group-hover:text-amber-700 dark:text-white dark:group-hover:text-amber-300">Expense Limit Rules</h2>
+                    <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Configure spending caps by scope, period, and action.</p>
+                </div>
+            </div>
+        </a>
+
+        <a href="/expense/limits/approvers" class="card card-hover p-5 group">
+            <div class="flex items-start gap-4">
+                <div class="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400">
+                    {{ icon_svg("shield-check", "h-5 w-5") }}
+                </div>
+                <div class="min-w-0">
+                    <h2 class="text-base font-semibold text-slate-900 group-hover:text-amber-700 dark:text-white dark:group-hover:text-amber-300">Approval Limits</h2>
+                    <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Define approval authority for expense claims.</p>
+                </div>
+            </div>
+        </a>
+    </div>
+</div>
+{% endblock %}

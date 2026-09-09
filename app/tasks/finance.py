@@ -12,6 +12,7 @@ Handles:
 import asyncio
 import html
 import logging
+from contextlib import closing
 from datetime import date
 from typing import Any
 from uuid import UUID
@@ -24,6 +25,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.db.session_context import (
     cross_org_session,
+    for_each_organization,
     prime_tenant_context,
     session_for_org,
 )
@@ -511,10 +513,27 @@ def process_monthly_depreciation_runs(
 
     run_cutoff_date = date.fromisoformat(as_of_date) if as_of_date else date.today()
 
-    with cross_org_session() as db:
+    # Discovery is the tenant catalogue, not a scan of `core_org.organization`
+    # through the ORM-listener bypass: that bypass never touched PostgreSQL RLS,
+    # so under `app_user` it enumerated nothing and the job reported a clean run
+    # having created no depreciation at all.
+    #
+    # The automation switches move inside the tenant session with it. They are
+    # `SettingDomain.automation` values, which resolve tenant -> platform ->
+    # default *through the session*; asked on an unscoped session they answered
+    # for no particular tenant. Asked here they answer for this one, which is
+    # what a per-tenant switch was always supposed to mean.
+    #
+    # Default `include_inactive=False`: the scan this replaces was
+    # `DepreciationService.list_active_organization_ids`, which filtered
+    # `Organization.is_active`. A deactivated tenant does not start new runs.
+    for organization_id, db in for_each_organization():
         if not DepreciationService.automation_enabled(db):
-            logger.info("Monthly FA depreciation automation is disabled")
-            return results
+            logger.info(
+                "Monthly FA depreciation automation is disabled for org %s",
+                organization_id,
+            )
+            continue
 
         effective_auto_post = (
             auto_post
@@ -523,44 +542,40 @@ def process_monthly_depreciation_runs(
         )
         results["automation_enabled"] = True
         results["auto_post"] = effective_auto_post
+        results["organizations_checked"] += 1
 
-        organization_ids = DepreciationService.list_active_organization_ids(db)
-    results["organizations_checked"] = len(organization_ids)
-
-    for organization_id in organization_ids:
-        with session_for_org(organization_id) as db:
-            try:
-                outcome = DepreciationService.create_automated_monthly_run(
-                    db,
-                    organization_id,
-                    as_of_date=run_cutoff_date,
-                    auto_post=effective_auto_post,
-                )
-                if outcome["status"] == "posted":
-                    results["runs_posted"] += 1
-                    reconciliation = outcome.get("gl_reconciliation")
-                    if isinstance(reconciliation, dict):
-                        if reconciliation.get("is_reconciled"):
-                            results["runs_reconciled"] += 1
-                        else:
-                            results["runs_requiring_review"] += 1
-                elif outcome["status"] == "calculated":
-                    results["runs_calculated"] += 1
-                else:
-                    results["skipped"] += 1
-                db.commit()
-            except Exception as exc:
-                logger.exception(
-                    "Monthly FA depreciation automation failed for org %s",
-                    organization_id,
-                )
-                db.rollback()
-                results["errors"].append(
-                    {
-                        "organization_id": str(organization_id),
-                        "error": str(exc),
-                    }
-                )
+        try:
+            outcome = DepreciationService.create_automated_monthly_run(
+                db,
+                organization_id,
+                as_of_date=run_cutoff_date,
+                auto_post=effective_auto_post,
+            )
+            if outcome["status"] == "posted":
+                results["runs_posted"] += 1
+                reconciliation = outcome.get("gl_reconciliation")
+                if isinstance(reconciliation, dict):
+                    if reconciliation.get("is_reconciled"):
+                        results["runs_reconciled"] += 1
+                    else:
+                        results["runs_requiring_review"] += 1
+            elif outcome["status"] == "calculated":
+                results["runs_calculated"] += 1
+            else:
+                results["skipped"] += 1
+            db.commit()
+        except Exception as exc:
+            logger.exception(
+                "Monthly FA depreciation automation failed for org %s",
+                organization_id,
+            )
+            db.rollback()
+            results["errors"].append(
+                {
+                    "organization_id": str(organization_id),
+                    "error": str(exc),
+                }
+            )
 
     logger.info(
         "Monthly FA depreciation automation complete: orgs=%d, calculated=%d, "
@@ -1393,15 +1408,24 @@ def sync_mono_transactions(**_legacy_kwargs: Any) -> dict[str, Any]:
 
     from app.models.finance.banking.bank_account import BankAccount, BankAccountStatus
 
-    with cross_org_session() as db:
-        mono_account_ids = list(
+    # One tenant session per organization instead of a single cross-tenant
+    # SELECT: `cross_org_session` lifted only the ORM listener, so under
+    # `app_user` this listed zero accounts and the sweep reported "no Mono-linked
+    # bank accounts" for a fleet full of them. The `organization_id` leg of the
+    # old ORDER BY is now the enumeration order itself.
+    #
+    # `include_inactive=True`: the old SELECT had no `Organization` predicate,
+    # and a deactivated tenant's linked account still has settled lines to pull.
+    mono_account_ids: list[str | None] = []
+    for _org_id, db in for_each_organization(include_inactive=True):
+        mono_account_ids.extend(
             db.scalars(
                 select(BankAccount.mono_account_id)
                 .where(
                     BankAccount.mono_account_id.isnot(None),
                     BankAccount.status == BankAccountStatus.active,
                 )
-                .order_by(BankAccount.organization_id, BankAccount.bank_account_id)
+                .order_by(BankAccount.bank_account_id)
             ).all()
         )
 
@@ -1668,32 +1692,35 @@ def refresh_stale_balances(batch_size: int = 200) -> dict[str, Any]:
     Runs frequently and refreshes only account/period keys invalidated by
     recent postings, keeping reporting aggregates current.
     """
-    from app.models.finance.gl.balance_refresh_queue import BalanceRefreshQueue
     from app.services.finance.gl.balance_refresh import BalanceRefreshService
 
-    with cross_org_session() as db:
-        org_ids = list(
-            db.scalars(
-                select(BalanceRefreshQueue.organization_id)
-                .where(BalanceRefreshQueue.processed_at.is_(None))
-                .distinct()
-                .limit(batch_size)
-            ).all()
-        )
-
+    # The queue no longer has to be probed across tenants to find out who has
+    # work: `process_queue` takes no organization_id and reads the queue through
+    # the session, so inside a tenant session it sees exactly that tenant's
+    # pending entries and returns zeros for a tenant with none. The old
+    # cross-tenant DISTINCT that fed this loop returned zero rows under
+    # `app_user`, which made every balance look fresh and stopped the refresh
+    # entirely — with no error to notice.
+    #
+    # `closing` because of the budget break below: leaving a generator
+    # mid-iteration must close the tenant session it is holding open now, not
+    # whenever the abandoned generator is collected. The break moved to the
+    # BOTTOM of the body for the same reason — `for_each_organization` opens a
+    # session before the body runs, so a top-of-body budget check would open one
+    # session purely to discover the budget was already spent.
     results = {"processed": 0, "refreshed": 0, "errors": 0}
     remaining = batch_size
-    for org_id in org_ids:
-        if remaining <= 0:
-            break
-        with session_for_org(org_id) as db:
+    with closing(for_each_organization(include_inactive=True)) as tenants:
+        for _org_id, db in tenants:
             service = BalanceRefreshService(db)
             org_results = service.process_queue(batch_size=remaining)
             db.commit()
-        results["processed"] += org_results["processed"]
-        results["refreshed"] += org_results["refreshed"]
-        results["errors"] += org_results["errors"]
-        remaining -= org_results["processed"]
+            results["processed"] += org_results["processed"]
+            results["refreshed"] += org_results["refreshed"]
+            results["errors"] += org_results["errors"]
+            remaining -= org_results["processed"]
+            if remaining <= 0:
+                break
 
     if results["refreshed"] > 0 or results["errors"] > 0:
         logger.info(
@@ -1708,32 +1735,29 @@ def refresh_stale_balances(batch_size: int = 200) -> dict[str, Any]:
 @shared_task
 def release_expired_stock_reservations(batch_size: int = 200) -> dict[str, Any]:
     """Release inventory reservations that passed expiry timestamp."""
-    from app.models.inventory.stock_reservation import StockReservation
     from app.services.inventory.stock_reservation import StockReservationService
 
-    with cross_org_session() as db:
-        org_ids = list(
-            db.scalars(
-                select(StockReservation.organization_id)
-                .where(StockReservation.expires_at.isnot(None))
-                .distinct()
-                .limit(batch_size)
-            ).all()
-        )
-
+    # Same shape as `refresh_stale_balances`: `release_expired` scopes through
+    # the session, so the cross-tenant DISTINCT that used to pick the orgs is
+    # not needed — and under `app_user` it found nobody, leaving every expired
+    # reservation holding stock forever.
+    #
+    # Same `closing` + bottom-of-body break as `refresh_stale_balances`, for the
+    # same reason: the budget must not cost an extra tenant session, and
+    # abandoning the generator must close the one it is holding.
     results = {"checked": 0, "released": 0, "errors": 0}
     remaining = batch_size
-    for org_id in org_ids:
-        if remaining <= 0:
-            break
-        with session_for_org(org_id) as db:
+    with closing(for_each_organization(include_inactive=True)) as tenants:
+        for _org_id, db in tenants:
             service = StockReservationService(db)
             org_results = service.release_expired(batch_size=remaining)
             db.commit()
-        results["checked"] += org_results["checked"]
-        results["released"] += org_results["released"]
-        results["errors"] += org_results["errors"]
-        remaining -= org_results["checked"]
+            results["checked"] += org_results["checked"]
+            results["released"] += org_results["released"]
+            results["errors"] += org_results["errors"]
+            remaining -= org_results["checked"]
+            if remaining <= 0:
+                break
 
     if results["released"] > 0 or results["errors"] > 0:
         logger.info(

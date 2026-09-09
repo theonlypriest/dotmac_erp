@@ -10,10 +10,15 @@ from uuid import uuid4
 
 import pytest
 
-from app.models.expense import ExpenseClaimStatus, LimitPeriodType
+from app.models.expense import (
+    ExpenseClaimStatus,
+    LimitPeriodType,
+    LimitResultType,
+    LimitScopeType,
+)
 from app.services.common import ValidationError
 from app.services.expense.expense_service import ExpenseService
-from app.services.expense.limit_service import ExpenseLimitService
+from app.services.expense.limit_service import EvaluationResult, ExpenseLimitService
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +108,60 @@ def test_add_claim_item_accepts_positive_amount():
             claimed_amount=Decimal("25.00"),
         )
     assert item.claimed_amount == Decimal("25.00")
+
+
+def test_live_limit_query_includes_employee_employment_type_scope() -> None:
+    db = MagicMock()
+    db.scalars.return_value.all.return_value = []
+    svc = ExpenseLimitService(db)
+    employment_type_id = uuid4()
+    employee = MagicMock(
+        employee_id=uuid4(),
+        department_id=None,
+        grade_id=None,
+        designation_id=None,
+        employment_type_id=employment_type_id,
+    )
+
+    assert svc.get_applicable_rules(uuid4(), employee, date(2026, 8, 28)) == []
+
+    statement = db.scalars.call_args.args[0]
+    rendered = str(statement.compile(compile_kwargs={"literal_binds": True}))
+    assert "EMPLOYMENT_TYPE" in rendered
+    assert str(employment_type_id) in rendered
+
+
+def test_live_claim_evaluation_applies_employment_type_block_rule() -> None:
+    db = MagicMock()
+    svc = ExpenseLimitService(db)
+    employment_type_id = uuid4()
+    employee = MagicMock(
+        employee_id=uuid4(),
+        department_id=None,
+        grade_id=None,
+        designation_id=None,
+        employment_type_id=employment_type_id,
+    )
+    rule = MagicMock(scope_type=LimitScopeType.EMPLOYMENT_TYPE)
+    db.get.return_value = employee
+    db.scalars.return_value.all.return_value = [rule]
+    claim = MagicMock(
+        organization_id=uuid4(),
+        employee_id=employee.employee_id,
+        claim_date=date(2026, 8, 28),
+        total_claimed_amount=Decimal("1000.00"),
+    )
+    blocked = EvaluationResult(
+        result=LimitResultType.BLOCKED,
+        message="Employment Type limit exceeded",
+        triggered_rule=rule,
+    )
+
+    with patch.object(svc, "_evaluate_rule", return_value=blocked) as evaluate:
+        result = svc.evaluate_claim(claim, preview_only=True)
+
+    assert result.result == LimitResultType.BLOCKED
+    evaluate.assert_called_once_with(claim, rule, employee)
 
 
 # ---------------------------------------------------------------------------

@@ -1218,31 +1218,38 @@ def sync_leave_attendance() -> dict:
                 ).all()
 
                 for leave in approved_leaves:
+                    sync_outcome: str | None = None
+                    savepoint_started = False
                     try:
-                        # Check if attendance record already exists
-                        existing = db.scalar(
-                            select(Attendance).where(
-                                Attendance.employee_id == leave.employee_id,
-                                Attendance.attendance_date == org_today,
+                        with db.begin_nested():
+                            savepoint_started = True
+                            # Check if attendance record already exists
+                            existing = db.scalar(
+                                select(Attendance).where(
+                                    Attendance.employee_id == leave.employee_id,
+                                    Attendance.attendance_date == org_today,
+                                )
                             )
-                        )
 
-                        if existing:
+                            if existing:
+                                sync_outcome = "already_marked"
+                            else:
+                                # Create ON_LEAVE attendance record
+                                attendance = Attendance(
+                                    organization_id=org_id,
+                                    employee_id=leave.employee_id,
+                                    attendance_date=org_today,
+                                    status=AttendanceStatus.ON_LEAVE,
+                                    leave_application_id=leave.application_id,
+                                    marked_by="SYSTEM",
+                                )
+                                db.add(attendance)
+                                db.flush()
+                                sync_outcome = "synced"
+                        if sync_outcome == "already_marked":
                             results["already_marked"] += 1
-                            continue
-
-                        # Create ON_LEAVE attendance record
-                        attendance = Attendance(
-                            organization_id=org_id,
-                            employee_id=leave.employee_id,
-                            attendance_date=org_today,
-                            status=AttendanceStatus.ON_LEAVE,
-                            leave_application_id=leave.application_id,
-                            marked_by="SYSTEM",
-                        )
-                        db.add(attendance)
-                        db.flush()
-                        results["synced"] += 1
+                        elif sync_outcome == "synced":
+                            results["synced"] += 1
 
                     except Exception as e:
                         logger.exception(
@@ -1258,13 +1265,34 @@ def sync_leave_attendance() -> dict:
                                 "error": str(e),
                             }
                         )
+                        if not savepoint_started:
+                            raise
 
-                status_result = leave_service.sync_employee_statuses_for_date(
-                    org_id,
-                    as_of_date=org_today,
-                )
-                results["status_set_on_leave"] += status_result["set_on_leave"]
-                results["status_set_active"] += status_result["set_active"]
+                status_savepoint_started = False
+                try:
+                    with db.begin_nested():
+                        status_savepoint_started = True
+                        status_result = leave_service.sync_employee_statuses_for_date(
+                            org_id,
+                            as_of_date=org_today,
+                        )
+                    results["status_set_on_leave"] += status_result["set_on_leave"]
+                    results["status_set_active"] += status_result["set_active"]
+                except Exception as e:
+                    logger.exception(
+                        "Failed to sync employee leave statuses for org %s: %s",
+                        org_id,
+                        e,
+                    )
+                    results["errors"].append(
+                        {
+                            "organization_id": str(org_id),
+                            "phase": "employee_status",
+                            "error": str(e),
+                        }
+                    )
+                    if not status_savepoint_started:
+                        raise
 
             except Exception as e:
                 logger.exception(
@@ -1278,8 +1306,24 @@ def sync_leave_attendance() -> dict:
                         "error": str(e),
                     }
                 )
-
-            db.commit()
+                db.rollback()
+            else:
+                try:
+                    db.commit()
+                except Exception as e:
+                    logger.exception(
+                        "Failed to commit leave sync for org %s: %s",
+                        org_id,
+                        e,
+                    )
+                    results["errors"].append(
+                        {
+                            "organization_id": str(org_id),
+                            "phase": "commit",
+                            "error": str(e),
+                        }
+                    )
+                    db.rollback()
 
     logger.info(
         "Leave → attendance/status sync complete: %d attendance synced, %d already marked, "

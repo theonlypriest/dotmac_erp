@@ -25,6 +25,9 @@ from app.models.people.payroll.salary_assignment import (
 from app.models.person import Person
 from app.services.finance.banking.bank_directory import BankDirectoryService
 from app.services.people.payroll.eligibility import payroll_employee_eligibility_clause
+from app.services.people.payroll.employment_type_classification import (
+    classify_payroll_employment_type,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -633,31 +636,19 @@ class PayrollReadinessService:
         if assignment is None:
             return False
 
-        from app.models.people.hr.employment_type import EmploymentType
         from app.models.people.payroll.salary_structure import SalaryStructure
-
-        employment_type = employee.employment_type
-        if employment_type is None and employee.employment_type_id:
-            employment_type = self.db.get(EmploymentType, employee.employment_type_id)
 
         structure = assignment.salary_structure
         if structure is None and assignment.structure_id:
             structure = self.db.get(SalaryStructure, assignment.structure_id)
 
-        type_code = (
-            (employment_type.type_code or "").strip().lower() if employment_type else ""
+        classification = classify_payroll_employment_type(
+            self.db,
+            organization_id=employee.organization_id,
+            employment_type_id=employee.employment_type_id,
         )
-        type_name = (
-            (employment_type.type_name or "").strip().lower() if employment_type else ""
-        )
-        structure_name = (
-            (structure.structure_name or "").strip().lower() if structure else ""
-        )
-
-        return (
-            type_code == "contract"
-            or type_name == "contract"
-            or structure_name == "contract staff"
+        return classification.is_contract_staff(
+            structure_name=structure.structure_name if structure else None
         )
 
     def check_readiness(

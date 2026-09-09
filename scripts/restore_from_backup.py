@@ -2,6 +2,19 @@
 """
 Extract only COPY (data) blocks from a pg_dump plain-SQL file.
 
+THIS IS NOT A RESTORE TOOL, despite the filename. It cannot rebuild a
+database: it skips every CREATE, ALTER, DROP, GRANT and REVOKE, so it produces
+no schema, no roles and no privileges. It reloads data into a database that
+already exists and is already migrated.
+
+For an actual restore -- cluster globals first, then a verified pg_restore of
+the database, with the resulting roles asserted -- use
+``scripts/restore_erp_db.sh``. The runbook is
+``docs/runbooks/database-restore.md``.
+
+The filename is retained because operators and scripts already reference it;
+the correction is this docstring, not a rename that would break them.
+
 Reads gzipped SQL dump, writes a clean SQL file containing:
   - SET statements (encoding, search_path, etc.)
   - All COPY ... FROM stdin blocks with their data

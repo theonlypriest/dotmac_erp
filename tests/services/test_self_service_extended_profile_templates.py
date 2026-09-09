@@ -39,3 +39,22 @@ def test_extended_profile_templates_render_repeatable_row_headings_and_remove():
         template = Path(f"templates/people/self/{name}").read_text(encoding="utf-8")
         assert "Remove" in template
         assert "${index + 1}" in template
+
+
+def test_extended_profile_templates_support_inline_document_page_workflow():
+    for section in [
+        "qualifications",
+        "certifications",
+        "skills",
+        "dependents",
+    ]:
+        template = Path(f"templates/people/self/{section}.html").read_text(
+            encoding="utf-8"
+        )
+        assert 'id="extended-profile-content"' in template
+        assert 'hx-boost="true"' in template
+        assert 'hx-target="#extended-profile-content"' in template
+        assert 'hx-select="#extended-profile-content"' in template
+        assert 'hx-swap="outerHTML"' in template
+        assert 'hx-push-url="false"' in template
+        assert f'action="/people/self/{section}"' in template

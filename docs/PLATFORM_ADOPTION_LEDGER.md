@@ -213,6 +213,90 @@ tenancy, permissions, settings, database schema or migration lineage.
 
 ## Adoption slices
 
+**2026-08-28 — Deployment release identity and reference adapter.** ERP declares one
+release-time `ProductAssemblySpec` for the canonical `dotmac-erp` product over
+the six module manifests already
+present in `COMPOSED_MODULE_LINEAGES`: Accounting, Files, Imports, Numbering,
+People and Tax. Its canonical `deploy/product-manifest.json` preserves exact module
+codes, distribution versions and explicit/effective persistence planes; it
+does not use the capability-only `ProductManifestSnapshot` as a substitute.
+
+The Docker context excludes `deploy/`, breaking the product-manifest/image
+digest self-reference. CI builds and tests one image, then transfers that exact
+image between jobs; the publication job is structurally forbidden from
+rebuilding it. Only after every gate in the CI workflow succeeds — including an
+exact pinned re-run of the independently required Engineering standards check
+— does the registry push return an immutable image digest; CI uploads a
+non-secret `image-release.json` binding that exact reference to `GITHUB_SHA`.
+ERP exact-pins the published `dotmac-deployment-foundation==0.2.0a2` build-time
+facility released from commit
+`55750e104df3dd94b6f9f70bf8c8db53986394c7`; its reusable conformance workflow
+is pinned to that SAME immutable commit, because a2's `image/audit.py` change
+and that revision's workflow change are two halves of one non-root
+image-inspection fix and are not independently pinnable. `deploy/product.toml`
+uses the same `dotmac-erp` product identity and binds the real canonical
+manifest digest. Its four deterministic rendered assets are checked
+byte-for-byte and parsed by a real Compose engine.
+
+The image digest is no longer a sentinel. Protected-main CI published the
+tested image for `9b3fb250ac9b0a8ed47cf60060d0eae737f0d4fd`, and the descriptor
+binds the digest that run resolved for it,
+`sha256:d33c172a6d93449e4815f04182f79fbf517e955f8efa1d61bd2a74f19bc9586c`, whose
+`org.opencontainers.image.revision` annotation equals that same revision. With
+the sentinel gone, `check_all` returns zero findings and the architecture
+test's `KNOWN_UNRESOLVED` ratchet is empty.
+
+This is a checked reference adapter, not host execution: no live deploy script,
+runtime factory, module authority, data or production environment moves in this
+slice. The detailed contracts are
+`docs/architecture/deployment-foundation-prerequisites.md` and
+`deploy/README.md`.
+
+**2026-08-28 — Audited ERP runtime-image preparation.** The protected-main
+candidate is built as a numeric-non-root runtime image with Poetry and Node
+confined to builders. CI runs the web process, worker, Beat, role preflight and
+migrations from the same local image under a read-only/capability-dropped
+envelope, then the exact-pinned Deployment Foundation `0.2.0a2` collector
+audits those same bytes before H3 export. The live Compose/deployer changes in
+this slice are compatibility-only: they retire the boot-time installer and use
+direct runtime executables now that Poetry is absent from the image.
+
+This is not the host cutover. Production read-only settings, digest-only H3
+evidence consumption, mutable-overlay retirement, signed-license material and
+resolved-Compose execution evidence remain one subsequent deployment-adapter
+slice. Keeping that boundary explicit prevents a CI-only hardening envelope
+from being reported as live runtime truth.
+
+**2026-08-28 — People Employment Type authority slice.** ERP pins
+`dotmac-people==0.1.0a2` and composes its independent
+`people` lineage at
+`pe_0001_people_directory`. The six manifest-declared tenant tables are
+created in `mod_people` with non-null tenant scope and ENABLEd/FORCEd RLS. ERP
+supplies and re-verifies `tenant_scope_catalog.v1`,
+`module_database_roles.v1` and `party_person_catalog.v1` from its own lineage;
+it does not run or stamp the kernel lineage.
+
+One ERP assembly owner imports the reviewed public a2 runtime surface. Web,
+API, HR, Payroll, projection and operator callers delegate to it, and all six
+legacy Employment Type decision writers are retired. Every module command
+synchronously invokes one private compatibility projector in the same Session;
+that exact-one writer is held by a two-directional architecture ratchet because
+retained Employee and Payroll foreign keys still require the legacy UUID rows.
+
+The activation migration removes the predecessor's reverse-source lock helper,
+grants the online role only read/insert/update projection privileges, and
+explicitly revokes destructive and table/column relationship privileges. It
+also makes deployment independent of the optional full RBAC seed by
+idempotently materializing the existing ERP permission contract: `admin` and
+`hr_director` receive Employment Type read/manage, while `hr_manager` and
+`hr_officer` receive read only. Existing active definitions and operator text
+are preserved; inactive definitions fail the migration. RBAC remains an ERP
+owner outside the People module. The predecessor bootstrap service and CLI are
+removed. The remaining operator CLI repairs module-to-compatibility drift
+only, refuses every legacy-only ID before writing, deletes nothing, and is
+idempotent. This records repository authority; it does not claim a production
+deployment or data cutover.
+
 **2026-08-25 — Numbering composition: tenant storage only.** ERP pins
 `dotmac-numbering==0.1.0a2` and composes its independent `numbering` lineage at
 `nu_0001_numbering`. The assembly explicitly selects only

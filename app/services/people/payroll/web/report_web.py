@@ -223,67 +223,20 @@ class ReportWebService:
         year = year or today.year
         month = month or today.month
 
-        start_date = date(year, month, 1)
-        if month == 12:
-            end_date = date(year + 1, 1, 1)
-        else:
-            end_date = date(year, month + 1, 1)
+        start_date = parse_date(request.query_params.get("start_date"))
+        end_date = parse_date(request.query_params.get("end_date"))
+        if not start_date and not end_date:
+            start_date = date(year, month, 1)
+            if month == 12:
+                end_date = date(year + 1, 1, 1) - timedelta(days=1)
+            else:
+                end_date = date(year, month + 1, 1) - timedelta(days=1)
 
-        # Get all approved/posted slips for the period
-        slips = list(
-            db.scalars(
-                select(SalarySlip).where(
-                    SalarySlip.organization_id == org_id,
-                    SalarySlip.status.in_(self._reportable_slip_statuses()),
-                    SalarySlip.start_date >= start_date,
-                    SalarySlip.start_date < end_date,
-                )
-            ).all()
+        report = PayrollService(db).get_payroll_tax_summary_report(
+            org_id,
+            start_date=start_date,
+            end_date=end_date,
         )
-
-        # Calculate totals
-        total_paye = sum(
-            (getattr(s, "paye", None) or Decimal("0") for s in slips), Decimal("0")
-        )
-        total_pension = sum(
-            (getattr(s, "pension_employee", None) or Decimal("0") for s in slips),
-            Decimal("0"),
-        )
-        total_nhf = sum(
-            (getattr(s, "nhf", None) or Decimal("0") for s in slips), Decimal("0")
-        )
-        total_nhis = sum(
-            (getattr(s, "nhis_employee", None) or Decimal("0") for s in slips),
-            Decimal("0"),
-        )
-        total_deductions = sum(
-            (getattr(s, "total_deduction", None) or Decimal("0") for s in slips),
-            Decimal("0"),
-        )
-        total_statutory = total_paye + total_pension + total_nhf + total_nhis
-        non_statutory_total = total_deductions - total_statutory
-
-        tax_summary = {
-            "total_paye": total_paye,
-            "total_pension": total_pension,
-            "total_nhf": total_nhf,
-            "total_nhis": total_nhis,
-            "total_statutory": total_statutory,
-            "non_statutory_total": non_statutory_total,
-            "total_deductions": total_deductions,
-            "employee_count": len(slips),
-        }
-
-        report = {
-            "total_paye": total_paye,
-            "total_pension": total_pension,
-            "total_nhf": total_nhf,
-            "total_nhis": total_nhis,
-            "statutory_total": total_statutory,
-            "non_statutory_total": non_statutory_total,
-            "total_deductions": total_deductions,
-            "employee_count": tax_summary["employee_count"],
-        }
 
         context = base_context(request, auth, "Tax Summary Report", "payroll", db=db)
         context["request"] = request
@@ -291,9 +244,8 @@ class ReportWebService:
             {
                 "year": year,
                 "month": month,
-                "start_date": start_date,
-                "end_date": end_date,
-                "tax_summary": tax_summary,
+                "start_date": report["start_date"],
+                "end_date": report["end_date"],
                 "report": report,
             }
         )

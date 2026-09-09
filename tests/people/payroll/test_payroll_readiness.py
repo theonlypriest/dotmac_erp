@@ -9,16 +9,19 @@ from app.services.people.payroll.data_completeness import (
     PayrollIssueType,
     PayrollReadinessService,
 )
+from app.services.people.payroll.employment_type_classification import (
+    PayrollEmploymentTypeClassification,
+)
 
 
-def _employee(*, employment_type=None, salary_mode=None, date_of_joining_value=None):
+def _employee(*, salary_mode=None, date_of_joining_value=None):
     return SimpleNamespace(
+        organization_id=uuid4(),
         employee_id=uuid4(),
         employee_code="EMP-001",
         full_name="Contract Worker",
         department=SimpleNamespace(department_name="Operations"),
-        employment_type=employment_type,
-        employment_type_id=None,
+        employment_type_id=uuid4(),
         salary_mode=salary_mode,
         bank_account_number=None,
         bank_name=None,
@@ -35,11 +38,13 @@ def _assignment(structure_name: str):
     )
 
 
-def test_contract_staff_without_tax_profile_is_not_flagged_for_review():
+def test_contract_staff_without_tax_profile_is_not_flagged_for_review(monkeypatch):
     db = MagicMock()
     service = PayrollReadinessService(db)
-    employee = _employee(
-        employment_type=SimpleNamespace(type_code="CONTRACT", type_name="Contract")
+    employee = _employee()
+    monkeypatch.setattr(
+        "app.services.people.payroll.data_completeness.classify_payroll_employment_type",
+        lambda *_args, **_kwargs: PayrollEmploymentTypeClassification("CONTRACT"),
     )
     readiness = service._check_employee_readiness(
         employee=employee,
@@ -60,11 +65,13 @@ def test_contract_staff_without_tax_profile_is_not_flagged_for_review():
     )
 
 
-def test_regular_staff_without_tax_profile_is_flagged_for_review():
+def test_regular_staff_without_tax_profile_is_flagged_for_review(monkeypatch):
     db = MagicMock()
     service = PayrollReadinessService(db)
-    employee = _employee(
-        employment_type=SimpleNamespace(type_code="FULL_TIME", type_name="Full Time")
+    employee = _employee()
+    monkeypatch.setattr(
+        "app.services.people.payroll.data_completeness.classify_payroll_employment_type",
+        lambda *_args, **_kwargs: PayrollEmploymentTypeClassification("FULL_TIME"),
     )
     readiness = service._check_employee_readiness(
         employee=employee,

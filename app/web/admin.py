@@ -4,6 +4,7 @@ Admin web routes.
 Provides admin dashboard and management pages with admin role requirement.
 """
 
+from html import escape
 from typing import Any
 from urllib.parse import urlencode
 from uuid import UUID
@@ -902,6 +903,14 @@ def _admin_base_context(
     request: Request, auth: WebAuthContext, page_title: str, db: Session
 ) -> dict:
     """Build base context for admin settings pages."""
+    csrf_token = str(getattr(request.state, "csrf_token", "") or "")
+    if not isinstance(getattr(request.state, "csrf_form", None), str):
+        request.state.csrf_form = (
+            f'<input type="hidden" name="csrf_token" value="{escape(csrf_token)}">'
+            if csrf_token
+            else ""
+        )
+
     organization = None
     if auth and auth.is_authenticated and auth.organization_id:
         from app.models.finance.core_org.organization import Organization
@@ -935,6 +944,26 @@ def admin_settings_hub(
         )
     )
     return templates.TemplateResponse(request, "admin/settings/index.html", context)
+
+
+@router.get("/settings/integrations", response_class=HTMLResponse)
+def admin_settings_integrations(
+    request: Request,
+    db: Session = Depends(get_db),
+    auth: WebAuthContext = Depends(optional_web_auth),
+):
+    """Unified integration control-plane hub."""
+    if not auth or not auth.is_authenticated or not auth.organization_id:
+        return RedirectResponse(
+            url="/login?next=/admin/settings/integrations", status_code=303
+        )
+    context = _admin_base_context(request, auth, "Integrations", db)
+    context.update(
+        admin_settings_web_service.get_integrations_context(db, auth.organization_id)
+    )
+    return templates.TemplateResponse(
+        request, "admin/settings/integrations.html", context
+    )
 
 
 @router.get("/settings/organization", response_class=HTMLResponse)
@@ -1703,6 +1732,9 @@ def admin_settings_paystack(
         context.update(
             admin_settings_web_service.get_paystack_context(db, auth.organization_id)
         )
+    base_url = str(request.base_url).rstrip("/")
+    context["paystack_webhook_url"] = f"{base_url}/api/v1/payments/webhook/paystack"
+    context["paystack_relay_path"] = "/api/v1/payment-events/paystack"
     return templates.TemplateResponse(request, "admin/settings/paystack.html", context)
 
 

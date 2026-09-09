@@ -57,6 +57,14 @@ class DotmacSubSyncWatermark(Base):
         DateTime(timezone=True),
         nullable=True,
     )
+    watermark_external_id: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+        comment=(
+            "Stable source id for the last row processed at watermark_at; "
+            "used by bounded invoice sync with upstream updated_at,id ordering"
+        ),
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

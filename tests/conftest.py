@@ -156,6 +156,8 @@ _test_engine = create_engine(
             "ar": None,
             "core_org": None,
             "hr": None,
+            "leave": None,
+            "payroll": None,
             "perf": None,
             "training": None,
             "pm": None,

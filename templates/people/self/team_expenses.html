@@ -1,14 +1,14 @@
 {% extends "people/base_people.html" %}
-{% from "components/macros.html" import pagination, compact_filters %}
+{% from "components/macros.html" import pagination, compact_filters, status_badge %}
 
-{% block page_title %}My Approvals{% endblock %}
+{% block page_title %}Team Expenses{% endblock %}
 
 {% block breadcrumbs %}
 <nav class="text-sm text-slate-500 dark:text-slate-400" aria-label="Breadcrumb">
     <ol class="flex">
         <li><a href="/dashboard" class="hover:text-teal-600 dark:hover:text-teal-400 transition-colors">Dashboard</a></li>
-        <li class="flex items-center"><span class="mx-2">/</span> <a href="/people/self/attendance" class="hover:text-teal-600 dark:hover:text-teal-400 transition-colors">Self Service</a></li>
-        <li class="flex items-center"><span class="mx-2">/</span> <span class="text-slate-900 dark:text-white" aria-current="page">My Approvals</span></li>
+        <li class="flex items-center"><span class="mx-2">/</span> <a href="/people/self" class="hover:text-teal-600 dark:hover:text-teal-400 transition-colors">Self Service</a></li>
+        <li class="flex items-center"><span class="mx-2">/</span> <span class="text-slate-900 dark:text-white" aria-current="page">Team Expenses</span></li>
     </ol>
 </nav>
 {% endblock %}
@@ -32,7 +32,12 @@
         </div>
     </div>
 
-    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+    <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
+        <div class="card p-5">
+            <p class="text-sm text-slate-500 dark:text-slate-400">Pending Claims</p>
+            <p class="text-2xl font-semibold text-amber-600 dark:text-amber-400">{{ summary.pending_count }}</p>
+            <p class="text-xs font-mono text-slate-500 dark:text-slate-400">{{ "{:,.2f}".format(summary.pending_total) }}</p>
+        </div>
         <div class="card p-5">
             <p class="text-sm text-slate-500 dark:text-slate-400">Approved Claims</p>
             <p class="text-2xl font-semibold text-emerald-600 dark:text-emerald-400">{{ summary.approved_count }}</p>
@@ -42,6 +47,11 @@
             <p class="text-sm text-slate-500 dark:text-slate-400">Rejected Claims</p>
             <p class="text-2xl font-semibold text-rose-600 dark:text-rose-400">{{ summary.rejected_count }}</p>
             <p class="text-xs font-mono text-slate-500 dark:text-slate-400">{{ "{:,.2f}".format(summary.rejected_total) }}</p>
+        </div>
+        <div class="card p-5">
+            <p class="text-sm text-slate-500 dark:text-slate-400">Paid Claims</p>
+            <p class="text-2xl font-semibold text-blue-600 dark:text-blue-400">{{ summary.paid_count }}</p>
+            <p class="text-xs font-mono text-slate-500 dark:text-slate-400">{{ "{:,.2f}".format(summary.paid_total) }}</p>
         </div>
         <div class="card p-5">
             <p class="text-sm text-slate-500 dark:text-slate-400">Approval Budget Balance</p>
@@ -60,16 +70,37 @@
     </div>
 
     {% call(filter_attrs) compact_filters(
-        base_url="/people/self/my-approvals",
-        active_filters=active_filters | default([])
+        base_url="/people/self/team/expenses",
+        active_filters=active_filters | default([]),
+        date_range=true,
+        start_date=start_date,
+        end_date=end_date
     ) %}
-    <div>
-        <div class="w-44">
+    <div class="space-y-4 sm:contents">
+        <div>
             <label class="form-label text-xs">Decision</label>
-            <select aria-label="Decision" name="status" class="form-select w-full" {{ filter_attrs }}>
+            <select aria-label="Decision" name="decision" class="form-select w-full" {{ filter_attrs }}>
                 <option value="">All Decisions</option>
+                {% for d in decisions %}
+                <option value="{{ d }}" {% if decision == d %}selected{% endif %}>{{ d | replace("_", " ") | title }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
+            <label class="form-label text-xs">Status</label>
+            <select aria-label="Status" name="status" class="form-select w-full" {{ filter_attrs }}>
+                <option value="">All Statuses</option>
                 {% for s in statuses %}
                 <option value="{{ s }}" {% if status == s %}selected{% endif %}>{{ s | replace("_", " ") | title }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
+            <label class="form-label text-xs">Employee</label>
+            <select aria-label="Employee" name="employee_id" class="form-select w-full" {{ filter_attrs }}>
+                <option value="">All Employees</option>
+                {% for employee in employee_options %}
+                <option value="{{ employee.employee_id }}" {% if employee.employee_id == selected_employee_id %}selected{% endif %}>{{ employee.name }}</option>
                 {% endfor %}
             </select>
         </div>
@@ -87,6 +118,7 @@
                             <th scope="col" class="px-4 py-3 text-left text-xs font-semibold text-slate-600 dark:text-slate-300 uppercase tracking-wider">Claim</th>
                             <th scope="col" class="px-4 py-3 text-left text-xs font-semibold text-slate-600 dark:text-slate-300 uppercase tracking-wider">Employee</th>
                             <th scope="col" class="px-4 py-3 text-left text-xs font-semibold text-slate-600 dark:text-slate-300 uppercase tracking-wider">Decision</th>
+                            <th scope="col" class="px-4 py-3 text-left text-xs font-semibold text-slate-600 dark:text-slate-300 uppercase tracking-wider">Status</th>
                             <th scope="col" class="px-4 py-3 text-right text-xs font-semibold text-slate-600 dark:text-slate-300 uppercase tracking-wider">Claimed</th>
                             <th scope="col" class="px-4 py-3 text-right text-xs font-semibold text-slate-600 dark:text-slate-300 uppercase tracking-wider">Approved</th>
                         </tr>
@@ -95,7 +127,7 @@
                         {% for item in approvals %}
                         <tr class="hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
                             <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300">
-                                {{ item.action_at.strftime("%Y-%m-%d %H:%M") if item.action_at else "-" }}
+                                {{ item.activity_at.strftime("%Y-%m-%d %H:%M") if item.activity_at else "-" }}
                             </td>
                             <td class="px-4 py-3">
                                 <a href="/expense/claims/{{ item.claim_id }}" class="font-mono text-sm text-teal-600 dark:text-teal-400 hover:underline">
@@ -107,10 +139,13 @@
                             <td class="px-4 py-3 text-sm">
                                 {% if item.action_type == "APPROVED" %}
                                 <span class="inline-flex items-center rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-medium text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-400">Approved</span>
-                                {% else %}
+                                {% elif item.action_type == "REJECTED" %}
                                 <span class="inline-flex items-center rounded-full bg-rose-100 px-2.5 py-0.5 text-xs font-medium text-rose-800 dark:bg-rose-900/30 dark:text-rose-400">Rejected</span>
+                                {% else %}
+                                <span class="inline-flex items-center rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-900/30 dark:text-amber-400">Pending</span>
                                 {% endif %}
                             </td>
+                            <td class="px-4 py-3 text-sm">{{ status_badge(item.status, size="sm") }}</td>
                             <td class="px-4 py-3 text-right text-sm font-mono text-slate-700 dark:text-slate-300">{{ "{:,.2f}".format(item.claimed_amount) }} {{ item.currency_code }}</td>
                             <td class="px-4 py-3 text-right text-sm font-mono text-slate-700 dark:text-slate-300">{{ "{:,.2f}".format(item.approved_amount) }} {{ item.currency_code }}</td>
                         </tr>
@@ -120,7 +155,7 @@
             </div>
             {% if total_pages > 1 %}
             <div class="px-4 py-3 border-t border-slate-200 dark:border-slate-700">
-                {{ pagination(page=page, total_pages=total_pages, total_count=total, limit=20, filters={"status": status}) }}
+                {{ pagination(page=page, total_pages=total_pages, total_count=total, limit=20, filters={"decision": decision, "status": status, "employee_id": employee_id, "start_date": start_date, "end_date": end_date}) }}
             </div>
             {% endif %}
         </div>

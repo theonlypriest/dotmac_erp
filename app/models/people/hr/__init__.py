@@ -19,6 +19,12 @@ from app.models.people.hr.checklist_template import (
 from app.models.people.hr.department import Department
 from app.models.people.hr.designation import Designation
 from app.models.people.hr.employee import Employee, EmployeeStatus, Gender
+from app.models.people.hr.staff_access_projection import (
+    StaffAccountStatusProjection,
+    StaffAccountStatusState,
+    StaffLeaveAccessRestriction,
+    StaffLeaveRestrictionStatus,
+)
 from app.models.people.hr.employee_extended import (
     DocumentType,
     EmployeeCertification,
@@ -120,6 +126,10 @@ __all__ = [
     "Employee",
     "EmployeeGrade",
     "EmployeeStatus",
+    "StaffAccountStatusProjection",
+    "StaffAccountStatusState",
+    "StaffLeaveAccessRestriction",
+    "StaffLeaveRestrictionStatus",
     "EmploymentType",
     "Gender",
     "Position",

@@ -194,6 +194,12 @@ FINANCE_PERMISSIONS = [
     ("fa:impairment:post", "Post impairments"),
     ("fa:categories:read", "View asset categories"),
     ("fa:categories:manage", "Manage asset categories"),
+    # CSV import. `read` describes the importer; `preview` is a dry run;
+    # `execute` creates assets. Enforced in
+    # app/api/fixed_assets/import_export.py.
+    ("fa:assets:import:read", "View fixed asset import capabilities"),
+    ("fa:assets:import:preview", "Preview a fixed asset import file (dry run)"),
+    ("fa:assets:import:execute", "Execute a fixed asset import"),
     # -------------------------------------------------------------------------
     # Banking
     # -------------------------------------------------------------------------
@@ -216,6 +222,18 @@ FINANCE_PERMISSIONS = [
     ("banking:transfers:approve", "Approve bank transfers"),
     ("banking:rules:read", "View transaction rules"),
     ("banking:rules:manage", "Manage transaction rules"),
+    # Mono Connect. These two are the singular-form codes the Mono routes
+    # at the foot of app/api/finance/banking.py enforce; they are graded
+    # with their plural siblings `banking:accounts:update` and
+    # `banking:statements:import` respectively.
+    (
+        "banking:account:update",
+        "Link, unlink, and configure a bank account's Mono Connect binding",
+    ),
+    (
+        "banking:statement:create",
+        "Trigger a Mono statement sync or refresh for a bank account",
+    ),
     # -------------------------------------------------------------------------
     # Inventory (INV)
     # -------------------------------------------------------------------------
@@ -401,6 +419,14 @@ FINANCE_PERMISSIONS = [
     ("payments:intents:create", "Create payment intents"),
     ("payments:webhooks:manage", "Manage payment webhooks"),
     ("payments:settings:manage", "Manage payment gateway settings"),
+    # Customer-facing invoice collection. Neither of these moves money out:
+    # `initialize` creates the Paystack transaction and the local intent,
+    # `verify` reconciles that intent when a webhook was missed.
+    ("payments:invoice:initialize", "Initialize a Paystack payment for an invoice"),
+    (
+        "payments:verify",
+        "Verify a payment with Paystack and reconcile the payment intent",
+    ),
     # Expense reimbursement payouts. These three are TIERED and are graded by
     # what the holder can cause, not by which screen they sit behind:
     #   read       - provider lookups (bank list, account-name resolution)
@@ -477,6 +503,13 @@ HR_PERMISSIONS = [
     ("hr:grades:manage", "Manage employee grades"),
     ("hr:employment_types:read", "View employment types"),
     ("hr:employment_types:manage", "Manage employment types"),
+    # -------------------------------------------------------------------------
+    # Person Identity Records
+    # -------------------------------------------------------------------------
+    # The `Person` row an employee record hangs off. Enforced on
+    # app/api/persons.py, which is the only writer surface for it.
+    ("people:read", "View person identity records"),
+    ("people:write", "Create, modify, and deactivate person identity records"),
     # -------------------------------------------------------------------------
     # Onboarding & Offboarding
     # -------------------------------------------------------------------------
@@ -854,6 +887,7 @@ ROLE_PERMISSIONS = {
         "fa:assets:read",
         "fa:depreciation:read",
         "fa:categories:read",
+        "fa:assets:import:read",
         "banking:accounts:read",
         "banking:statements:read",
         "banking:reconciliation:read",
@@ -1031,6 +1065,9 @@ ROLE_PERMISSIONS = {
         "fa:impairment:post",
         "fa:categories:read",
         "fa:categories:manage",
+        "fa:assets:import:read",
+        "fa:assets:import:preview",
+        "fa:assets:import:execute",
         "banking:accounts:read",
         "banking:accounts:create",
         "banking:accounts:update",
@@ -1050,6 +1087,8 @@ ROLE_PERMISSIONS = {
         "banking:transfers:approve",
         "banking:rules:read",
         "banking:rules:manage",
+        "banking:account:update",
+        "banking:statement:create",
         "inventory:items:read",
         "inventory:items:create",
         "inventory:items:update",
@@ -1197,6 +1236,8 @@ ROLE_PERMISSIONS = {
         "payments:intents:create",
         "payments:webhooks:manage",
         "payments:settings:manage",
+        "payments:invoice:initialize",
+        "payments:verify",
         "automation:recurring:read",
         "automation:recurring:manage",
         "automation:workflows:read",
@@ -1339,6 +1380,9 @@ ROLE_PERMISSIONS = {
         "fa:revaluation:post",
         "fa:categories:read",
         "fa:categories:manage",
+        "fa:assets:import:read",
+        "fa:assets:import:preview",
+        "fa:assets:import:execute",
         # Banking
         "banking:accounts:read",
         "banking:accounts:create",
@@ -1358,6 +1402,8 @@ ROLE_PERMISSIONS = {
         "banking:transfers:approve",
         "banking:rules:read",
         "banking:rules:manage",
+        "banking:account:update",
+        "banking:statement:create",
         # Inventory
         "inventory:items:read",
         "inventory:items:create",
@@ -1573,6 +1619,7 @@ ROLE_PERMISSIONS = {
         "banking:reconciliation:update",
         "banking:reconciliation:submit",
         "banking:reconciliation:complete",
+        "banking:statement:create",
         "inventory:items:read",
         "inventory:transactions:read",
         "inventory:stock:read",
@@ -1692,6 +1739,7 @@ ROLE_PERMISSIONS = {
         "fa:assets:read",
         "fa:depreciation:read",
         "fa:categories:read",
+        "fa:assets:import:read",
         "banking:accounts:read",
         "banking:statements:read",
         "banking:reconciliation:read",
@@ -1853,6 +1901,7 @@ ROLE_PERMISSIONS = {
         "fa:assets:read",
         "fa:depreciation:read",
         "fa:categories:read",
+        "fa:assets:import:read",
         "gl:accounts:read",
     ],
     "asset_manager": [
@@ -1870,6 +1919,9 @@ ROLE_PERMISSIONS = {
         "fa:impairment:create",
         "fa:categories:read",
         "fa:categories:manage",
+        "fa:assets:import:read",
+        "fa:assets:import:preview",
+        "fa:assets:import:execute",
         "gl:accounts:read",
     ],
     "asset_custodian": [
@@ -1880,12 +1932,16 @@ ROLE_PERMISSIONS = {
         "fa:assets:transfer",
         "fa:depreciation:read",
         "fa:categories:read",
+        "fa:assets:import:read",
+        "fa:assets:import:preview",
+        "fa:assets:import:execute",
     ],
     "asset_viewer": [
         "fa:access",
         "fa:assets:read",
         "fa:depreciation:read",
         "fa:categories:read",
+        "fa:assets:import:read",
     ],
     "tax_specialist": [
         "finance:access",
@@ -1960,6 +2016,8 @@ ROLE_PERMISSIONS = {
         "hr:employees:terminate",
         "hr:employees:transfer",
         "hr:employees:promote",
+        "people:read",
+        "people:write",
         "hr:departments:read",
         "hr:departments:manage",
         "hr:designations:read",

@@ -887,7 +887,10 @@ class WorkflowService:
             )
 
         try:
-            from app.services.finance.automation.entity_registry import resolve_entity
+            from app.services.finance.automation.entity_registry import (
+                field_authority_owner,
+                resolve_entity,
+            )
 
             entity = resolve_entity(
                 db,
@@ -904,6 +907,16 @@ class WorkflowService:
                 return ActionResult(
                     success=False,
                     error_message=f"Entity has no field '{field_name}'",
+                )
+
+            owner = field_authority_owner(context.entity_type, field_name)
+            if owner is not None:
+                return ActionResult(
+                    success=False,
+                    error_message=(
+                        f"'{field_name}' on {context.entity_type} is owned by "
+                        f"{owner}; a workflow rule may not write it"
+                    ),
                 )
 
             setattr(entity, field_name, value)

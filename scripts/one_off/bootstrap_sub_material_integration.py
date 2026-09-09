@@ -18,7 +18,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 LABEL = "dotmac-sub-material-integration"
 SERVICE_EMAIL = "service-dotmac-sub-material@dotmac.io"
 EVENT_NAME = "sub.material_request.status_changed"
-SCOPES = ["sub:inventory:read", "sub:material:write", "sub:material:read"]
+SCOPES = [
+    "sub:inventory:read",
+    "sub:material:write",
+    "sub:material:read",
+    "sub:domain:write",
+]
 
 
 def _args() -> argparse.Namespace:
@@ -111,6 +116,9 @@ def main() -> int:
                 is_active=True,
             )
             db.add(key)
+            db.flush()
+        elif key.scopes != SCOPES:
+            key.scopes = SCOPES
             db.flush()
 
         hook = db.scalar(

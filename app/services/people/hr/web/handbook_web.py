@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.models.people.hr.handbook import DocumentCategory, DocumentStatus
 from app.services.people.hr.handbook_service import (
     HRDocumentService,
+    HRDocumentStorageUnavailableError,
     HRDocumentValidationError,
 )
 from app.services.upload_utils import get_env_max_bytes, read_upload_bytes
@@ -201,6 +202,7 @@ class HRHandbookWebService:
                     org_id,
                     file.filename,
                     file_content,
+                    content_type=file.content_type,
                 )
 
                 # Create document record
@@ -234,7 +236,8 @@ class HRHandbookWebService:
                     status_code=303,
                 )
 
-        except HRDocumentValidationError as e:
+        except (HRDocumentValidationError, HRDocumentStorageUnavailableError) as exc:
+            storage_unavailable = isinstance(exc, HRDocumentStorageUnavailableError)
             document_opt = (
                 service.get_document(org_id, document_id) if document_id else None
             )
@@ -246,14 +249,14 @@ class HRHandbookWebService:
                     "document": document_opt,
                     "categories": list(DocumentCategory),
                     "statuses": list(DocumentStatus),
-                    "error": str(e),
+                    "error": str(exc),
                     "csrf_token": getattr(request.state, "csrf_token", ""),
                 }
             )
             return templates.TemplateResponse(
                 "people/hr/handbook/document_form.html",
                 context,
-                status_code=400,
+                status_code=503 if storage_unavailable else 400,
             )
 
     def document_detail_response(

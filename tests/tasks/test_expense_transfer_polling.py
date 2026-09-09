@@ -12,10 +12,11 @@ about a scheduled reconciler of money movements:
    failed one, and never leave it in limbo.
 
 2. **A stale worker does not corrupt state that has moved.** The worker selects
-   rows in one session and acts on them in another, minutes and one network
-   call later. Anything it decided from the first read must be re-proved before
-   it is written, or it will stamp EXPIRED over an in-flight payout and reopen
-   transfers a webhook already settled.
+   rows, then acts on them minutes and one network call later. Anything it
+   decided from the first read must be re-proved before it is written, or it
+   will stamp EXPIRED over an in-flight payout and reopen transfers a webhook
+   already settled. The selection used to run in a whole other session; it now
+   runs in the tenant's, which narrows the window without closing it.
 
 Written against both shapes deliberately: the per-organization session mock
 answers ``.all()`` (how the pre-fix worker loaded intents) as well as
@@ -49,10 +50,16 @@ from app.models.finance.payments.payment_intent import (
     PaymentDirection,
     PaymentIntentStatus,
 )
-from app.services.finance.payments.paystack_client import PaystackError
+from app.services.finance.payments.paystack_client import (
+    PaystackError,
+    PaystackUnreachable,
+)
+from app.db import session_context
+from app import tenant_catalog
 from app.tasks import expense as expense_tasks
 
 ORG_A = uuid.UUID("00000000-0000-0000-0000-0000000000a1")
+ORG_B = uuid.UUID("00000000-0000-0000-0000-0000000000b2")
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +108,7 @@ def _make_intent(
         updated_at=None,
         poll_count=poll_count,
         last_poll_error=None,
+        unresolved_since=None,
     )
 
 
@@ -135,7 +143,15 @@ def _verify_result(
 
 
 class _Harness:
-    """Wires the job's two session kinds to mocks and records what happened."""
+    """Wires the job's tenant sessions to one mock and records what happened.
+
+    Both of ``PaymentService``'s selections now run inside the tenant session
+    rather than a cross-organization one, so ``stale_rows`` and ``stuck_rows``
+    are answered by the SAME session mock, in pass order: the expiry pass reads
+    first, the poll pass second. Each is a list of ``(intent_id,
+    organization_id)`` — the id-only shape ``_group_by_organization`` folds into
+    ``{org: [ids]}``.
+    """
 
     def __init__(self, *, stale_rows, stuck_rows, intent, claim) -> None:
         self.stale_rows = stale_rows
@@ -143,7 +159,7 @@ class _Harness:
         self.intent = intent
         self.claim = claim
         self.orgs_opened: list[uuid.UUID] = []
-        self._cross_results = [stale_rows, stuck_rows]
+        self._selections = [stale_rows, stuck_rows]
 
         self.db = MagicMock(name="db:org-a")
         # `.one_or_none()` is how PaymentService locks a single intent;
@@ -151,18 +167,18 @@ class _Harness:
         # answered so these tests mean something against either shape.
         self.db.scalars.return_value.one_or_none.return_value = intent
         self.db.scalars.return_value.all.return_value = [intent]
+        # The two selections, in pass order. A third read gets nothing rather
+        # than raising, so an extra pass shows up as an assertion failure about
+        # behaviour instead of a StopIteration about the fake.
+        self.db.execute.return_value.all.side_effect = self._next_selection
         # process_successful_transfer's FOR UPDATE re-fetch.
         self.db.execute.return_value.scalar_one_or_none.return_value = intent
         # _update_batch_item_status: this intent is not part of a batch.
         self.db.scalar.return_value = None
         self.db.get.return_value = claim
 
-    @contextmanager
-    def cross_org_session(self):
-        cross_db = MagicMock(name="db:cross-org")
-        rows = self._cross_results.pop(0) if self._cross_results else []
-        cross_db.execute.return_value.all.return_value = rows
-        yield cross_db
+    def _next_selection(self):
+        return self._selections.pop(0) if self._selections else []
 
     @contextmanager
     def session_for_org(self, organization_id: uuid.UUID):
@@ -237,8 +253,14 @@ def _expense_mark_paid(harness: _Harness):
 
 
 def _run(harness: _Harness, monkeypatch) -> dict:
-    monkeypatch.setattr(expense_tasks, "cross_org_session", harness.cross_org_session)
-    monkeypatch.setattr(expense_tasks, "session_for_org", harness.session_for_org)
+    """Drive the job with a one-tenant fleet.
+
+    ``for_each_organization``'s own seam is patched — the catalogue definer and
+    ``session_for_org`` where they live — because the job no longer binds either
+    name itself.
+    """
+    monkeypatch.setattr(session_context, "session_for_org", harness.session_for_org)
+    monkeypatch.setattr(tenant_catalog, "organization_ids", lambda **_: [ORG_A])
     return expense_tasks.poll_stuck_expense_transfers()
 
 
@@ -307,12 +329,18 @@ class TestAmbiguousAttemptConverges:
         assert results["failed"] == 1
         harness.db.commit.assert_called()
 
-    def test_unreachable_transfer_settles_once_the_budget_is_spent(
+    def test_an_unreachable_transfer_becomes_indeterminate_not_failed(
         self, monkeypatch, paystack_configured
     ) -> None:
-        """An ambiguous transfer Paystack will not answer about still has to
-        stop somewhere. The circuit breaker is the owner's decision now; the
-        last attempt settles it FAILED and says why in gateway_response."""
+        """Spending the attempt budget ends the polling. It is not a verdict.
+
+        This test asserted FAILED when the single-writer fix moved the circuit
+        breaker into the owner, because that is what the behaviour was: ten
+        unanswered attempts produced the identical row Paystack's own
+        "this failed" answer produces. ADR-0007 separates them — an outcome
+        nobody observed is INDETERMINATE, and `unresolved_since` starts the
+        clock an operator is eventually paged on.
+        """
         claim_id = uuid.uuid4()
         intent = _make_intent(
             status=PaymentIntentStatus.PROCESSING,
@@ -327,17 +355,52 @@ class TestAmbiguousAttemptConverges:
             claim=_make_claim(claim_id),
         )
 
-        with _paystack(verify_error=PaystackError("Request timed out")):
+        with _paystack(verify_error=PaystackUnreachable("Request failed: timeout")):
             results = _run(harness, monkeypatch)
 
         assert intent.poll_count == 10
-        assert intent.status == PaymentIntentStatus.FAILED
-        assert intent.gateway_response["poll_abandoned"] is True
+        assert intent.status == PaymentIntentStatus.INDETERMINATE
+        assert intent.unresolved_since is not None
+        assert intent.gateway_response["poll_abandoned_unobserved"] is True
+        assert intent.gateway_response["outcome_observed"] is False
         assert intent.gateway_response["poll_attempts"] == 10
-        assert intent.last_poll_error == "Request timed out"
-        assert results["abandoned"] == 1
-        # An abandoned intent is a verdict, not an unresolved error.
+        assert intent.last_poll_error == "Request failed: timeout"
+        assert results["indeterminate"] == 1
+        # Not counted as abandoned: abandoned means Paystack answered.
+        assert results["abandoned"] == 0
+        # An unresolved intent is a recorded state, not a transient error.
         assert results["errors"] == []
+        # And the claim is untouched — it is not payable again.
+        assert harness.claim.status == ExpenseClaimStatus.APPROVED
+
+    def test_a_provider_refusal_at_the_budget_still_settles_failed(
+        self, monkeypatch, paystack_configured
+    ) -> None:
+        """Specificity for the test above: the give-up path did not simply stop
+        producing FAILED. When Paystack ANSWERED and refused, FAILED is the
+        honest record and the claim becomes payable again."""
+        claim_id = uuid.uuid4()
+        intent = _make_intent(
+            status=PaymentIntentStatus.PROCESSING,
+            transfer_code="TRF_amb",
+            poll_count=9,
+            source_id=claim_id,
+        )
+        harness = _Harness(
+            stale_rows=[],
+            stuck_rows=[(intent.intent_id, ORG_A)],
+            intent=intent,
+            claim=_make_claim(claim_id),
+        )
+
+        with _paystack(verify_error=PaystackError("Transfer not found")):
+            results = _run(harness, monkeypatch)
+
+        assert intent.status == PaymentIntentStatus.FAILED
+        assert intent.unresolved_since is None
+        assert intent.gateway_response["poll_abandoned"] is True
+        assert results["abandoned"] == 1
+        assert results.get("indeterminate", 0) == 0
 
     def test_a_retryable_failure_is_reported_and_left_alone(
         self, monkeypatch, paystack_configured
@@ -357,12 +420,14 @@ class TestAmbiguousAttemptConverges:
             claim=_make_claim(claim_id),
         )
 
-        with _paystack(verify_error=PaystackError("Request timed out")):
+        with _paystack(verify_error=PaystackUnreachable("Request failed: timeout")):
             results = _run(harness, monkeypatch)
 
         assert intent.status == PaymentIntentStatus.PROCESSING
         assert intent.poll_count == 1
+        assert intent.unresolved_since is None
         assert results["abandoned"] == 0
+        assert results["indeterminate"] == 0
         assert len(results["errors"]) == 1
         assert results["errors"][0]["intent_id"] == str(intent.intent_id)
 
@@ -373,8 +438,10 @@ class TestAmbiguousAttemptConverges:
 
 
 class TestStaleWorkerReplay:
-    """Both passes of this job read in one session and write in another. What
-    they decided from the first read has to be re-proved before it is written."""
+    """Both passes select rows, then act on them a lock and a network call
+    later. What the selection decided has to be re-proved before it is written —
+    that is true whether the select ran in another session (it used to) or in
+    this one (it does now); only the size of the window changed."""
 
     def test_expiry_does_not_stamp_over_a_transfer_that_has_since_started(
         self, monkeypatch, paystack_configured
@@ -408,7 +475,8 @@ class TestStaleWorkerReplay:
         assert moved.status == PaymentIntentStatus.PROCESSING
         assert moved.transfer_code == "TRF_started_in_the_gap"
         assert results.get("expired", 0) == 0
-        assert harness.orgs_opened == [ORG_A]
+        # One session for the expiry pass, one for the poll pass.
+        assert harness.orgs_opened == [ORG_A, ORG_A]
 
     def test_expiry_still_expires_an_intent_that_really_did_stall(
         self, monkeypatch, paystack_configured
@@ -476,7 +544,9 @@ class TestStaleWorkerReplay:
         self, monkeypatch
     ) -> None:
         """No Paystack keys means no verdict is obtainable, so nothing may be
-        written — least of all a FAILED that reads as 'Paystack said no'."""
+        written — least of all a FAILED that reads as 'Paystack said no'. The
+        intent is left in PROCESSING and its attempt budget untouched, so the
+        next pass (against a configured tenant) starts from where it was."""
         claim_id = uuid.uuid4()
         intent = _make_intent(
             status=PaymentIntentStatus.PROCESSING,
@@ -503,3 +573,70 @@ class TestStaleWorkerReplay:
         assert intent.poll_count == 0
         assert results["completed"] == 0
         assert results["failed"] == 0
+
+
+# ===========================================================================
+# 3. Unresolved money is discovered without a cross-tenant data session
+# ===========================================================================
+
+
+def test_unresolved_reconciler_fans_out_through_tenant_sessions(monkeypatch) -> None:
+    """The hourly slow lane must remain usable under the canonical app role.
+
+    Tenant identifiers come from the narrow catalogue, including inactive
+    organizations whose money still needs a verdict. Protected payout rows and
+    their age metric are then read only through per-tenant RLS sessions.
+    """
+    sessions = {ORG_A: MagicMock(name="db:org-a"), ORG_B: MagicMock(name="db:org-b")}
+    opened: list[uuid.UUID] = []
+
+    @contextmanager
+    def _tenant_session(org_id: uuid.UUID):
+        opened.append(org_id)
+        yield sessions[org_id]
+
+    discover = MagicMock(return_value=[ORG_A, ORG_B])
+    monkeypatch.setattr(expense_tasks, "organization_ids", discover)
+    monkeypatch.setattr(expense_tasks, "session_for_org", _tenant_session)
+    # The fan-out retired the module-local `cross_org_session` name, so the
+    # sentinel moves to where the function is DEFINED: any layer under this
+    # task that still reaches for a cross-tenant session trips it. The absent
+    # name is asserted too, so the sentinel cannot quietly become a no-op
+    # patch of an attribute nothing looks up.
+    assert not hasattr(expense_tasks, "cross_org_session")
+    monkeypatch.setattr(
+        session_context,
+        "cross_org_session",
+        MagicMock(side_effect=AssertionError("cross-tenant payout read")),
+    )
+
+    unresolved_id = uuid.uuid4()
+    with (
+        patch(
+            "app.services.finance.payments.payment_service.PaymentService"
+        ) as service_cls,
+        patch("app.metrics.set_transfer_unresolved_oldest_age") as set_oldest,
+    ):
+        service_cls.find_indeterminate_transfer_intents.side_effect = [
+            [],
+            [unresolved_id],
+        ]
+        service_cls.oldest_unresolved_transfer_age.side_effect = [
+            timedelta(hours=2),
+            timedelta(hours=5),
+        ]
+        service_cls.return_value.resolve_transfer_polling_config.return_value = None
+
+        result = expense_tasks.reconcile_unresolved_expense_transfers()
+
+    discover.assert_called_once_with(include_inactive=True)
+    assert opened == [ORG_A, ORG_B, ORG_B]
+    service_cls.find_indeterminate_transfer_intents.assert_any_call(
+        sessions[ORG_A], organization_id=ORG_A
+    )
+    service_cls.find_indeterminate_transfer_intents.assert_any_call(
+        sessions[ORG_B], organization_id=ORG_B
+    )
+    set_oldest.assert_called_once_with(timedelta(hours=5).total_seconds())
+    assert result["intents_checked"] == 0
+    assert result["still_unresolved"] == 0

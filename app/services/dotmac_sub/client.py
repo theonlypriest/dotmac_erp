@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from collections.abc import Callable, Generator
 from dataclasses import dataclass
@@ -42,14 +43,40 @@ from app.services.finance.money_boundary import (
     check_canonical_money_string,
     to_boundary_money,
 )
-from app.metrics import observe_integration_request
+from app.metrics import observe_integration_request, observe_paystack_selfcare_relay
 from app.observability import get_request_id
 
 logger = logging.getLogger(__name__)
 
+_INTEGRATION_CLIENT_HEADER = "X-Dotmac-Integration-Client"
+_INTEGRATION_CLIENT_NAME = "dotmac-erp"
+
 # Reachability-circuit cooldown (seconds); <= 0 disables the breaker.
 _CIRCUIT_COOLDOWN_ENV = "DOTMAC_SUB_CIRCUIT_SECONDS"
 _CIRCUIT_COOLDOWN_DEFAULT = 30.0
+_MAX_INFLIGHT_ENV = "DOTMAC_SUB_MAX_INFLIGHT_REQUESTS"
+_MAX_INFLIGHT_DEFAULT = 4
+
+
+def _max_inflight_requests() -> int:
+    raw = os.getenv(_MAX_INFLIGHT_ENV, "")
+    try:
+        value = int(raw) if raw else _MAX_INFLIGHT_DEFAULT
+    except ValueError:
+        value = _MAX_INFLIGHT_DEFAULT
+        logger.warning(
+            "Invalid %s=%r; using default %d",
+            _MAX_INFLIGHT_ENV,
+            raw,
+            _MAX_INFLIGHT_DEFAULT,
+        )
+    return max(1, min(value, 32))
+
+
+# One admission pool per ERP worker keeps concurrent bulk-sync calls bounded.
+# The signed Paystack relay intentionally does not use this pool: payment
+# notification delivery must not wait behind a large reconciliation run.
+_REQUEST_SLOTS = threading.BoundedSemaphore(_max_inflight_requests())
 
 
 def _circuit_cooldown_seconds() -> float:
@@ -72,6 +99,20 @@ def _request_id_provider() -> str | None:
     """Propagate ERP's x-request-id contextvar onto outbound sub calls."""
     request_id = get_request_id()
     return request_id or None
+
+
+def _response_detail(response: httpx.Response) -> str:
+    try:
+        data = response.json()
+    except ValueError:
+        return response.text.strip()
+    if isinstance(data, dict):
+        detail = data.get("detail") or data.get("message") or data.get("error")
+        if isinstance(detail, str):
+            return detail.strip()
+        if detail is not None:
+            return str(detail)
+    return ""
 
 
 class DotmacSubError(Exception):
@@ -107,6 +148,10 @@ class DotmacSubRateLimitError(DotmacSubError):
     ) -> None:
         super().__init__(message, status_code)
         self.retry_after = retry_after
+
+
+class DotmacSubPermanentSyncError(DotmacSubError):
+    """A dotmac_sub rejection that needs data/configuration to be fixed."""
 
 
 class _TransientServerError(DotmacSubError):
@@ -418,6 +463,9 @@ class InvoiceRecord:
     # Drives the incremental sync watermark so we only pull the delta each
     # cycle; consumers needing the wire text format it back explicitly.
     updated_at: datetime | None = None
+    # Subscriber identity is embedded by the sync feed so bulk invoice pulls
+    # do not make a rate-limited detail request for every account.
+    account: SubscriberRecord | None = None
     lines: tuple[InvoiceLineRecord, ...] = ()
     allocations: tuple[AllocationRecord, ...] = ()
 
@@ -744,6 +792,12 @@ def _defaulted_money(
     value = item.get(key)
     if value is None or value == "":
         return Decimal(default)
+    # Older Sub deployments serialize zero-default facts as ``"0"`` even
+    # when the currency contract requires fixed minor units. Normalize only
+    # that exact compatibility token here; required, optional and nonzero
+    # money facts still pass through the strict parser unchanged.
+    if value == "0" and minor_units is not None and minor_units > 0:
+        value = f"0.{('0' * minor_units)}"
     return _parse_money_value(
         value, record=record, field=key, updated_at=updated_at, minor_units=minor_units
     )
@@ -954,7 +1008,10 @@ class DotmacSubClient:
             non_retryable_excs=(DotmacSubError,),
             loop_exhausted_factory=self._loop_exhausted_error,
             circuit=ReachabilityCircuit(cooldown_seconds=_circuit_cooldown_seconds()),
-            auth_headers=lambda: {"X-Api-Key": self._api_key()},
+            auth_headers=lambda: {
+                "X-Api-Key": self._api_key(),
+                _INTEGRATION_CLIENT_HEADER: _INTEGRATION_CLIENT_NAME,
+            },
             edge="dotmac_sub",
             request_id_provider=_request_id_provider,
         )
@@ -1026,6 +1083,16 @@ class DotmacSubClient:
         transient subclass; auth/404 raise immediately.
         """
         status = response.status_code
+        if status == 403 and endpoint.endswith("/erp-department"):
+            detail = _response_detail(response)
+            message = (
+                "Self-Care API key is missing the "
+                "operations:service_team:membership scope required for ERP "
+                "department membership sync."
+            )
+            if detail:
+                message = f"{message} Self-Care detail: {detail}"
+            raise DotmacSubPermanentSyncError(message, status_code=status)
         if status in (401, 403):
             raise DotmacSubAuthenticationError(
                 "Authentication failed for dotmac_sub.", status_code=status
@@ -1042,6 +1109,29 @@ class DotmacSubClient:
                     response.headers.get("Retry-After")
                 ),
             )
+        if status in (409, 422):
+            detail = _response_detail(response)
+            if endpoint.endswith("/erp-department") and status == 422:
+                message = (
+                    "Department is not mapped in Self-Care. Map this ERP "
+                    "department first."
+                )
+            elif endpoint.endswith("/erp-department") and status == 409:
+                message = (
+                    "ERP employee is already linked to a different Self-Care "
+                    "user. Resolve the duplicate account link."
+                )
+            elif endpoint.endswith("/roles") and status == 422:
+                message = (
+                    "Self-Care rejected one or more ERP staff roles. Ensure "
+                    "the employee dotmac_sub_roles exist and are active in "
+                    "Self-Care."
+                )
+            else:
+                message = "Self-Care rejected the request."
+            if detail:
+                message = f"{message} Self-Care detail: {detail}"
+            raise DotmacSubPermanentSyncError(message, status_code=status)
         if status >= 500:
             raise _TransientServerError(f"Server error: {status}", status_code=status)
         response.raise_for_status()
@@ -1086,13 +1176,14 @@ class DotmacSubClient:
         started_at = time.perf_counter()
         metric_status: str | None = None
         try:
-            result = self._engine.request(
-                method,
-                endpoint,
-                params=params,
-                json_data=json,
-                handler_kwargs={"endpoint": endpoint},
-            )
+            with _REQUEST_SLOTS:
+                result = self._engine.request(
+                    method,
+                    endpoint,
+                    params=params,
+                    json_data=json,
+                    handler_kwargs={"endpoint": endpoint},
+                )
             metric_status = "success"
             return result
         except _TransientServerError as e:
@@ -1112,6 +1203,9 @@ class DotmacSubClient:
             raise
         except DotmacSubRateLimitError:
             metric_status = "rate_limited"
+            raise
+        except DotmacSubPermanentSyncError:
+            metric_status = "client_error"
             raise
         except httpx.TimeoutException as e:
             metric_status = "timeout"
@@ -1138,23 +1232,57 @@ class DotmacSubClient:
         raw_payload: bytes,
         signature: str,
     ) -> dict[str, Any]:
-        """Relay the exact Paystack-signed bytes to Sub's existing ingress."""
+        """Relay exact signed bytes on a lane isolated from bulk-sync traffic."""
 
         if not raw_payload or not signature.strip():
             raise ValueError("Paystack payload and signature are required")
+        started_at = time.perf_counter()
+        outcome = "request_error"
         try:
             response = self.client.post(
                 "/payment-events/paystack",
                 content=raw_payload,
                 headers={"X-Paystack-Signature": signature.strip()},
             )
-            response.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise DotmacSubError("Selfcare rejected the Paystack relay") from exc
-        result = response.json()
-        if not isinstance(result, dict):
-            raise DotmacSubError("Selfcare returned an invalid Paystack relay result")
-        return result
+            if response.status_code == 429:
+                outcome = "rate_limited"
+                raise DotmacSubRateLimitError(
+                    "Selfcare rate-limited the Paystack relay",
+                    status_code=429,
+                    retry_after=self._parse_retry_after(
+                        response.headers.get("Retry-After")
+                    ),
+                )
+            if response.status_code >= 500:
+                outcome = "server_error"
+                raise DotmacSubError(
+                    "Selfcare could not accept the Paystack relay",
+                    status_code=response.status_code,
+                )
+            if response.status_code >= 400:
+                outcome = "client_error"
+                raise DotmacSubError(
+                    "Selfcare rejected the Paystack relay",
+                    status_code=response.status_code,
+                )
+            result = response.json()
+            if not isinstance(result, dict):
+                outcome = "invalid_response"
+                raise DotmacSubError(
+                    "Selfcare returned an invalid Paystack relay result"
+                )
+            outcome = "success"
+            return result
+        except httpx.TimeoutException as exc:
+            outcome = "timeout"
+            raise DotmacSubError("Selfcare Paystack relay timed out") from exc
+        except httpx.RequestError as exc:
+            outcome = "request_error"
+            raise DotmacSubError("Selfcare Paystack relay was unreachable") from exc
+        finally:
+            observe_paystack_selfcare_relay(
+                outcome, max(time.perf_counter() - started_at, 0.0)
+            )
 
     def _paginate(
         self,
@@ -1264,6 +1392,28 @@ class DotmacSubClient:
             "PUT",
             f"/staff-accounts/{account_id}/roles",
             json={"roles": roles},
+        )
+        return dict(result) if isinstance(result, dict) else {}
+
+    def sync_staff_account_erp_department(
+        self,
+        account_id: str,
+        *,
+        erp_employee_id: str,
+        employee_code: str | None,
+        erp_organization_id: str,
+        department: dict[str, str | None] | None,
+    ) -> dict[str, Any]:
+        """Replace the ERP-managed service-team membership in dotmac_sub."""
+        result = self._request(
+            "PUT",
+            f"/staff-accounts/{account_id}/erp-department",
+            json={
+                "erp_employee_id": erp_employee_id,
+                "employee_code": employee_code,
+                "erp_organization_id": erp_organization_id,
+                "department": department,
+            },
         )
         return dict(result) if isinstance(result, dict) else {}
 
@@ -1496,6 +1646,11 @@ class DotmacSubClient:
             memo=item.get("memo"),
             is_proforma=bool(item.get("is_proforma", False)),
             updated_at=updated_at,
+            account=(
+                self._parse_subscriber(item["account"])
+                if isinstance(item.get("account"), dict)
+                else None
+            ),
             lines=lines,
             allocations=_allocations(
                 item.get("payment_allocations"),

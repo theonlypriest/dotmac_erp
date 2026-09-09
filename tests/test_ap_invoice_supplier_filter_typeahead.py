@@ -92,3 +92,48 @@ def test_ap_invoices_template_uses_remote_supplier_typeahead():
     assert 'data-typeahead-url="/finance/ap/suppliers/search"' in template
     assert "data-typeahead-hidden" in template
     assert 'filter_entity_select_field("supplier_id"' not in template
+
+
+def test_list_invoices_context_stats_do_not_reintroduce_supplier_invoice_from():
+    org_id = uuid4()
+    db = MagicMock()
+    db.execute.return_value.all.return_value = []
+    db.scalar.side_effect = [0, Decimal("300"), Decimal("100"), Decimal("200"), 0]
+
+    InvoiceWebService.list_invoices_context(
+        db=db,
+        organization_id=str(org_id),
+        search="Acme",
+        supplier_id=None,
+        status=None,
+        start_date="2026-01-01",
+        end_date="2026-01-31",
+        page=1,
+    )
+
+    scalar_statements = [call.args[0] for call in db.scalar.call_args_list]
+    balance_statements = scalar_statements[1:4]
+
+    for statement in balance_statements:
+        final_froms = statement.get_final_froms()
+        assert len(final_froms) == 1
+        assert final_froms[0] is not SupplierInvoice.__table__
+
+        sql = str(statement)
+        inner_sql = str(final_froms[0].element)
+        assert "sum(anon_1.balance_due)" in sql
+        assert "JOIN ap.supplier" in inner_sql
+        assert "ap.supplier_invoice.organization_id" in inner_sql
+        assert "ap.supplier_invoice.invoice_date >=" in inner_sql
+        assert "ap.supplier_invoice.invoice_date <=" in inner_sql
+        assert "ap.supplier_invoice.status IN" in inner_sql
+        assert "ap.supplier.legal_name" in inner_sql
+
+    past_due_sql = str(balance_statements[1])
+    due_this_week_sql = str(balance_statements[2])
+    assert "anon_1.due_date <" in past_due_sql
+    assert "anon_1.due_date >=" in due_this_week_sql
+    assert "anon_1.due_date <=" in due_this_week_sql
+
+    pending_count_sql = str(scalar_statements[4])
+    assert "ap.supplier_invoice.status =" in pending_count_sql

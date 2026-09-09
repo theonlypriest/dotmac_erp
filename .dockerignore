@@ -16,3 +16,19 @@ docs
 .env
 .env.*
 docker-compose*.yml
+# Release/deployment control-plane inputs are deliberately outside the image.
+# Keeping deploy/product-manifest.json out of COPY . . breaks the impossible
+# image-digest -> product-manifest -> image-digest self-reference. CI binds the
+# two immutable facts with image-release.json after the registry returns the
+# pushed image digest.
+deploy/
+# Runtime images receive only named files via explicit COPY instructions. Keep
+# operator material and report/export artefacts out of the build context too.
+license/*
+!license/.gitkeep
+reports/
+proposals/
+asset_import_cleaned.csv
+stock_tracked_items.csv
+go-live-checklist.html
+ui-audit-report.html

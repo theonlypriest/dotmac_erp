@@ -1,9 +1,11 @@
 """Organization routes - Departments, Designations, Employment Types, Grades."""
 
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from types import SimpleNamespace
 from typing import Any
 from urllib.parse import quote_plus
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -23,6 +25,7 @@ from app.services.people.hr import (
     OrganizationService,
     ValidationError,
 )
+from app.services.people.hr.employment_types import EmploymentTypeService
 from app.services.people.hr.web import hr_web_service
 from app.services.people.hr.web.employee_web import DROPDOWN_LIMIT
 from app.templates import templates
@@ -31,6 +34,7 @@ from app.web.deps import (
     WebAuthContext,
     base_context,
     require_hr_access,
+    require_web_permission,
 )
 
 from ._common import _parse_bool
@@ -38,6 +42,15 @@ from ._common import _parse_bool
 router = APIRouter()
 
 DEPARTMENT_MANAGE_ROLES = frozenset({"admin", "hr_director", "hr_manager"})
+
+
+@dataclass(frozen=True, slots=True)
+class _EmploymentTypeActor:
+    id: UUID
+
+
+def _employment_type_actor(auth: WebAuthContext) -> _EmploymentTypeActor:
+    return _EmploymentTypeActor(coerce_uuid(auth.person_id))
 
 
 def _can_manage_departments(auth: WebAuthContext) -> bool:
@@ -477,7 +490,7 @@ def list_employment_types(
     request: Request,
     search: str | None = None,
     page: int = Query(default=1, ge=1),
-    auth: WebAuthContext = Depends(require_hr_access),
+    auth: WebAuthContext = Depends(require_web_permission("hr:employment_types:read")),
     db: Session = Depends(get_db_for_org),
 ):
     """Employment types list page."""
@@ -489,7 +502,9 @@ def list_employment_types(
 @router.get("/employment-types/new", response_class=HTMLResponse)
 def new_employment_type_form(
     request: Request,
-    auth: WebAuthContext = Depends(require_hr_access),
+    auth: WebAuthContext = Depends(
+        require_web_permission("hr:employment_types:manage")
+    ),
     db: Session = Depends(get_db_for_org),
 ):
     """New employment type form page."""
@@ -500,7 +515,9 @@ def new_employment_type_form(
 def edit_employment_type_form(
     request: Request,
     employment_type_id: str,
-    auth: WebAuthContext = Depends(require_hr_access),
+    auth: WebAuthContext = Depends(
+        require_web_permission("hr:employment_types:manage")
+    ),
     db: Session = Depends(get_db_for_org),
 ):
     """Edit employment type form page."""
@@ -512,7 +529,9 @@ def edit_employment_type_form(
 @router.post("/employment-types/new")
 async def create_employment_type(
     request: Request,
-    auth: WebAuthContext = Depends(require_hr_access),
+    auth: WebAuthContext = Depends(
+        require_web_permission("hr:employment_types:manage")
+    ),
     db: Session = Depends(get_db_for_org),
 ):
     """Handle new employment type form submission."""
@@ -523,7 +542,7 @@ async def create_employment_type(
     type_code = _form_str(form, "type_code")
     type_name = _form_str(form, "type_name")
     description = _form_str(form, "description")
-    is_active = _parse_bool(form.get("is_active"), True)
+    is_active = _parse_bool(form.get("is_active"), False)
 
     if not type_code or not type_name:
         context = {
@@ -547,7 +566,7 @@ async def create_employment_type(
         )
 
     org_id = coerce_uuid(auth.organization_id)
-    svc = OrganizationService(db, org_id)
+    svc = EmploymentTypeService(db, org_id, _employment_type_actor(auth))
 
     data = EmploymentTypeCreateData(
         type_code=type_code,
@@ -568,7 +587,9 @@ async def create_employment_type(
 async def update_employment_type(
     request: Request,
     employment_type_id: str,
-    auth: WebAuthContext = Depends(require_hr_access),
+    auth: WebAuthContext = Depends(
+        require_web_permission("hr:employment_types:manage")
+    ),
     db: Session = Depends(get_db_for_org),
 ):
     """Handle employment type update form submission."""
@@ -579,11 +600,11 @@ async def update_employment_type(
     type_code = _form_str(form, "type_code")
     type_name = _form_str(form, "type_name")
     description = _form_str(form, "description")
-    is_active = _parse_bool(form.get("is_active"), True)
+    is_active = _parse_bool(form.get("is_active"), False)
 
     if not type_code or not type_name:
         org_id = coerce_uuid(auth.organization_id)
-        svc = OrganizationService(db, org_id)
+        svc = EmploymentTypeService(db, org_id)
         employment_type = svc.get_employment_type(coerce_uuid(employment_type_id))
         context = {
             **base_context(request, auth, "Edit Employment Type", "employment-types"),
@@ -591,7 +612,7 @@ async def update_employment_type(
                 employment_type_id=employment_type.employment_type_id,
                 type_code=type_code or employment_type.type_code,
                 type_name=type_name or employment_type.type_name,
-                description=description or employment_type.description,
+                description=description,
                 is_active=is_active,
             ),
             "errors": {
@@ -607,12 +628,13 @@ async def update_employment_type(
         )
 
     org_id = coerce_uuid(auth.organization_id)
-    svc = OrganizationService(db, org_id)
+    svc = EmploymentTypeService(db, org_id, _employment_type_actor(auth))
 
     data = EmploymentTypeUpdateData(
         type_code=type_code,
         type_name=type_name,
         description=description or None,
+        description_is_set=True,
         is_active=is_active,
     )
 

@@ -2,11 +2,14 @@
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+from uuid import uuid4
 
 from sqlalchemy.exc import OperationalError
 
 from app.models.email_profile import EmailModule
 from app.models.notification import EntityType
+
+ORG_ID = uuid4()
 
 
 def _operational_error() -> OperationalError:
@@ -17,14 +20,15 @@ def _build_notification(
     *,
     email: str | None = "user@example.com",
     entity_type: EntityType = EntityType.LEAVE,
+    action_url: str | None = "/self",
 ) -> SimpleNamespace:
     return SimpleNamespace(
         notification_id="notif-1",
         recipient=SimpleNamespace(email=email),
         title="Leave update",
         message="Your request",
-        action_url="/self",
-        organization_id="org-1",
+        action_url=action_url,
+        organization_id=ORG_ID,
         channel=None,
         entity_type=entity_type,
         email_retry_count=0,
@@ -33,13 +37,37 @@ def _build_notification(
     )
 
 
+def test_email_module_routing_covers_module_specific_profiles() -> None:
+    from app.tasks.notifications import _email_module_for_notification
+
+    cases = [
+        (EntityType.TICKET, None, EmailModule.SUPPORT),
+        (EntityType.EXPENSE, None, EmailModule.EXPENSE),
+        (EntityType.PAYROLL, None, EmailModule.PEOPLE_PAYROLL),
+        (EntityType.DISCIPLINE, None, EmailModule.PEOPLE_PAYROLL),
+        (EntityType.TAX_PERIOD, None, EmailModule.FINANCE),
+        (EntityType.SYSTEM, "/fleet/maintenance", EmailModule.INVENTORY_FLEET),
+        (EntityType.SYSTEM, "/procurement/requests/1", EmailModule.PROCUREMENT),
+        (EntityType.SYSTEM, "/pm/tasks/1", EmailModule.OPERATIONS),
+        (EntityType.SYSTEM, None, EmailModule.ADMIN),
+    ]
+
+    for entity_type, action_url, expected in cases:
+        notification = _build_notification(
+            entity_type=entity_type,
+            action_url=action_url,
+        )
+        assert _email_module_for_notification(notification) == expected
+
+
 def test_process_pending_notification_emails_retries_on_operational_error() -> None:
     class RetryCalled(Exception):
         pass
 
     with (
+        patch("app.tasks.notifications.active_organization_ids", return_value=[ORG_ID]),
         patch(
-            "app.tasks.notifications.cross_org_session",
+            "app.tasks.notifications.session_for_org",
             side_effect=_operational_error(),
         ),
         patch(
@@ -64,7 +92,8 @@ def test_process_pending_notification_emails_retries_on_operational_error() -> N
 
 def test_process_pending_notification_emails_sends_active_notification() -> None:
     with (
-        patch("app.tasks.notifications.cross_org_session") as mock_session_local,
+        patch("app.tasks.notifications.active_organization_ids", return_value=[ORG_ID]),
+        patch("app.tasks.notifications.session_for_org") as mock_session_local,
         patch("app.tasks.notifications.person_can_receive_email", return_value=True),
         patch(
             "app.tasks.notifications.send_email", return_value=True
@@ -90,9 +119,10 @@ def test_process_pending_notification_emails_sends_active_notification() -> None
         assert "Review leave" in mock_send_email.call_args.kwargs["body_html"]
 
 
-def test_process_pending_notification_emails_routes_non_leave_to_admin() -> None:
+def test_process_pending_notification_emails_routes_ticket_to_support() -> None:
     with (
-        patch("app.tasks.notifications.cross_org_session") as mock_session_local,
+        patch("app.tasks.notifications.active_organization_ids", return_value=[ORG_ID]),
+        patch("app.tasks.notifications.session_for_org") as mock_session_local,
         patch("app.tasks.notifications.person_can_receive_email", return_value=True),
         patch(
             "app.tasks.notifications.send_email", return_value=True
@@ -113,13 +143,14 @@ def test_process_pending_notification_emails_routes_non_leave_to_admin() -> None
 
         assert result["processed"] == 1
         assert result["sent"] == 1
-        assert mock_send_email.call_args.kwargs["module"] == EmailModule.ADMIN
+        assert mock_send_email.call_args.kwargs["module"] == EmailModule.SUPPORT
         assert "Open notification" in mock_send_email.call_args.kwargs["body_html"]
 
 
-def test_process_pending_invoice_mention_email_uses_admin_profile() -> None:
+def test_process_pending_invoice_mention_email_uses_finance_profile() -> None:
     with (
-        patch("app.tasks.notifications.cross_org_session") as mock_session_local,
+        patch("app.tasks.notifications.active_organization_ids", return_value=[ORG_ID]),
+        patch("app.tasks.notifications.session_for_org") as mock_session_local,
         patch("app.tasks.notifications.person_can_receive_email", return_value=True),
         patch(
             "app.tasks.notifications.send_email", return_value=True
@@ -139,14 +170,15 @@ def test_process_pending_invoice_mention_email_uses_admin_profile() -> None:
         result = process_pending_notification_emails(batch_size=1)
 
         assert result["sent"] == 1
-        assert mock_send_email.call_args.kwargs["module"] == EmailModule.ADMIN
+        assert mock_send_email.call_args.kwargs["module"] == EmailModule.FINANCE
 
 
 def test_process_pending_notification_emails_routes_employee_to_people_payroll() -> (
     None
 ):
     with (
-        patch("app.tasks.notifications.cross_org_session") as mock_session_local,
+        patch("app.tasks.notifications.active_organization_ids", return_value=[ORG_ID]),
+        patch("app.tasks.notifications.session_for_org") as mock_session_local,
         patch("app.tasks.notifications.person_can_receive_email", return_value=True),
         patch(
             "app.tasks.notifications.send_email", return_value=True
@@ -172,7 +204,8 @@ def test_process_pending_notification_emails_routes_employee_to_people_payroll()
 
 def test_process_pending_notification_emails_skips_when_email_missing() -> None:
     with (
-        patch("app.tasks.notifications.cross_org_session") as mock_session_local,
+        patch("app.tasks.notifications.active_organization_ids", return_value=[ORG_ID]),
+        patch("app.tasks.notifications.session_for_org") as mock_session_local,
         patch("app.tasks.notifications.person_can_receive_email", return_value=True),
         patch("app.tasks.notifications.send_email") as mock_send_email,
     ):
@@ -197,7 +230,8 @@ def test_process_pending_notification_emails_skips_when_email_missing() -> None:
 
 def test_process_pending_notification_emails_backs_off_after_send_failure() -> None:
     with (
-        patch("app.tasks.notifications.cross_org_session") as mock_session_local,
+        patch("app.tasks.notifications.active_organization_ids", return_value=[ORG_ID]),
+        patch("app.tasks.notifications.session_for_org") as mock_session_local,
         patch("app.tasks.notifications.person_can_receive_email", return_value=True),
         patch("app.tasks.notifications.send_email", return_value=False),
     ):

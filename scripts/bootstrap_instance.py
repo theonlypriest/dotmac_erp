@@ -227,6 +227,11 @@ def generate_env(
         DEFAULT_FUNCTIONAL_CURRENCY_CODE={currency}
         DEFAULT_PRESENTATION_CURRENCY_CODE={currency}
 
+        # Build-only pointer. Set this to an absolute, readable local file that
+        # contains the approved Forgejo package-read token. Never paste the
+        # token value into this generated environment file.
+        FORGEJO_TOKEN_FILE=
+
         # Gunicorn
         GUNICORN_WORKERS=2
         GUNICORN_LOG_LEVEL=info
@@ -271,7 +276,10 @@ def generate_docker_compose(org_code: str) -> str:
               retries: 3
 
           app:
-            build: ${{APP_BUILD_CONTEXT:-./../..}}
+            build:
+              context: ${{APP_BUILD_CONTEXT:-./../..}}
+              secrets:
+                - forgejo_token
             container_name: dotmac_{slug}_app
             restart: unless-stopped
             ports:
@@ -305,7 +313,10 @@ def generate_docker_compose(org_code: str) -> str:
             command: ["gunicorn", "-c", "gunicorn.conf.py", "app.main:app"]
 
           worker:
-            build: ${{APP_BUILD_CONTEXT:-./../..}}
+            build:
+              context: ${{APP_BUILD_CONTEXT:-./../..}}
+              secrets:
+                - forgejo_token
             container_name: dotmac_{slug}_worker
             restart: unless-stopped
             env_file:
@@ -328,7 +339,10 @@ def generate_docker_compose(org_code: str) -> str:
             command: ["celery", "-A", "app.celery_app", "worker", "-l", "info"]
 
           beat:
-            build: ${{APP_BUILD_CONTEXT:-./../..}}
+            build:
+              context: ${{APP_BUILD_CONTEXT:-./../..}}
+              secrets:
+                - forgejo_token
             container_name: dotmac_{slug}_beat
             restart: unless-stopped
             env_file:
@@ -375,6 +389,10 @@ def generate_docker_compose(org_code: str) -> str:
             command: ["redis-server", "--requirepass", "${{REDIS_PASSWORD}}"]
             ports:
               - "${{REDIS_PORT}}:6379"
+
+        secrets:
+          forgejo_token:
+            file: ${{FORGEJO_TOKEN_FILE:?Set FORGEJO_TOKEN_FILE to an absolute readable local token file}}
 
         volumes:
           db_data:
@@ -590,6 +608,26 @@ def generate_setup_script(org_code: str) -> str:
         echo "=== Setting up DotMac ERP instance: {org_code} ==="
         echo ""
 
+        # The Dockerfile refuses private-package resolution without a BuildKit
+        # secret. Resolve only its local file pointer from the caller or .env;
+        # never source .env or read/echo the token value in this script.
+        if [[ -z "${{FORGEJO_TOKEN_FILE:-}}" && -f .env ]]; then
+            FORGEJO_TOKEN_FILE="$(sed -n 's/^FORGEJO_TOKEN_FILE=//p' .env | tail -n 1)"
+        fi
+        if [[ -z "${{FORGEJO_TOKEN_FILE:-}}" ]]; then
+            echo "ERROR: set FORGEJO_TOKEN_FILE to an absolute file containing the approved Forgejo read token." >&2
+            exit 2
+        fi
+        if [[ "$FORGEJO_TOKEN_FILE" != /* ]]; then
+            echo "ERROR: FORGEJO_TOKEN_FILE must be an absolute path." >&2
+            exit 2
+        fi
+        if [[ ! -f "$FORGEJO_TOKEN_FILE" || ! -r "$FORGEJO_TOKEN_FILE" || ! -s "$FORGEJO_TOKEN_FILE" ]]; then
+            echo "ERROR: FORGEJO_TOKEN_FILE must identify a non-empty readable regular file." >&2
+            exit 2
+        fi
+        export FORGEJO_TOKEN_FILE
+
         # Step 1: Start infrastructure (db, redis, openbao first)
         echo "[1/4] Starting infrastructure..."
         docker compose up -d db redis openbao
@@ -632,7 +670,8 @@ def generate_readme(org_code: str, org_name: str, app_port: int) -> str:
         ## Quick Start
 
         ```bash
-        # First time setup (builds, migrates, seeds)
+        # First set FORGEJO_TOKEN_FILE in .env to an approved absolute local
+        # token-file pointer; then build, migrate, and seed.
         ./setup.sh
 
         # Start / stop
@@ -662,9 +701,12 @@ def generate_readme(org_code: str, org_name: str, app_port: int) -> str:
 
         1. Copy this entire directory to the remote server
         2. Ensure Docker and Docker Compose are installed
-        3. Set `APP_BUILD_CONTEXT` in `.env` to point to the app source, or
-           build the Docker image separately and push to a registry
-        4. Run `./setup.sh`
+        3. Set `APP_BUILD_CONTEXT` in `.env` to point to the app source
+        4. Store the approved Forgejo package-read token outside this generated
+           directory and set `FORGEJO_TOKEN_FILE` in `.env` to that file's
+           absolute path. Never paste the token value into `.env` or Compose.
+        5. Run `./setup.sh`; it fails before starting infrastructure when the
+           pointer is absent, relative, empty, or unreadable
 
         ## Updating
 

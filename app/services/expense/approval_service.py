@@ -33,6 +33,7 @@ from app.models.expense import (
     ExpenseLimitRule,
     LimitActionType,
 )
+from app.services.people.hr.employment_types import EmploymentTypeService
 
 logger = logging.getLogger(__name__)
 
@@ -875,8 +876,14 @@ class ExpenseApprovalService:
             ).all()
         )
 
-        # Filter by employment type
-        employee_type = getattr(employee, "employment_type", None)
+        employee_type_code = None
+        if employee.employment_type_id is not None:
+            employee_type_code = (
+                EmploymentTypeService(self.db, organization_id)
+                .get_employment_type(employee.employment_type_id)
+                .type_code.strip()
+                .upper()
+            )
         filtered = []
 
         for rule in all_rules:
@@ -885,15 +892,17 @@ class ExpenseApprovalService:
                 continue
 
             # Check employment_type filter
-            type_filter = rule.dimension_filters.get("employment_types", [])
-            if not type_filter:
+            configured_codes = rule.dimension_filters.get("employment_types", [])
+            if not configured_codes:
                 filtered.append(rule)
                 continue
 
-            if employee_type and employee_type in type_filter:
-                filtered.append(rule)
-            elif not employee_type:
-                # No employment type set - include rules without type filter
+            normalized_codes = {
+                str(code).strip().upper()
+                for code in configured_codes
+                if str(code).strip()
+            }
+            if employee_type_code in normalized_codes:
                 filtered.append(rule)
 
         return filtered

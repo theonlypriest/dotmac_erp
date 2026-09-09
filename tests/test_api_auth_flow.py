@@ -2,6 +2,8 @@ import ipaddress
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 
 try:
     from datetime import UTC  # type: ignore
@@ -23,6 +25,21 @@ from app.models.person import Person
 from app.services import auth_flow as auth_flow_service
 from app.services.auth_flow import hash_password
 from tests.conftest import DEFAULT_TEST_ORG_ID
+
+
+@pytest.fixture()
+def tenant_catalog(monkeypatch):
+    """Expose the test tenant through the production catalog boundary."""
+
+    def _active_organization_ids(*, only=None):
+        if only is not None and only != DEFAULT_TEST_ORG_ID:
+            return []
+        return [DEFAULT_TEST_ORG_ID]
+
+    monkeypatch.setattr(
+        "app.services.auth_flow_api.active_organization_ids",
+        _active_organization_ids,
+    )
 
 
 def _build_request(
@@ -369,14 +386,14 @@ class TestPasswordAPI:
             assert session.status == SessionStatus.revoked
             assert session.revoked_at is not None
 
-    def test_forgot_password(self, client, db_session, person):
+    def test_forgot_password(self, client, db_session, person, tenant_catalog):
         """Test forgot password request."""
         payload = {"email": person.email}
         response = client.post("/auth/forgot-password", json=payload)
         # Always returns success to prevent email enumeration
         assert response.status_code == 200
 
-    def test_forgot_password_nonexistent_email(self, client):
+    def test_forgot_password_nonexistent_email(self, client, tenant_catalog):
         """Test forgot password with non-existent email."""
         payload = {"email": "nonexistent@example.com"}
         response = client.post("/auth/forgot-password", json=payload)
@@ -419,7 +436,9 @@ class TestPasswordAPI:
 
         assert app_url == "https://erp.example.com"
 
-    def test_reset_password_revokes_sessions(self, client, db_session, person):
+    def test_reset_password_revokes_sessions(
+        self, client, db_session, person, tenant_catalog
+    ):
         """Test reset password revokes active sessions."""
         credential = UserCredential(
             person_id=person.id,
@@ -451,11 +470,18 @@ class TestPasswordAPI:
 
         reset = auth_flow_service.request_password_reset(db_session, person.email)
         assert reset is not None
+        assert (
+            auth_flow_service.password_reset_organization_hint(reset["token"])
+            == person.organization_id
+        )
 
         payload = {"token": reset["token"], "new_password": "newpassword456"}
         response = client.post("/auth/reset-password", json=payload)
         assert response.status_code == 200
 
+        # The public endpoint now performs the mutation in its own fully
+        # tenant-scoped session, so discard this fixture session's cache.
+        db_session.expire_all()
         sessions = (
             db_session.query(AuthSession)
             .filter(AuthSession.person_id == person.id)
@@ -699,7 +725,7 @@ class TestAuthFlowAPIV1:
         response = client.get("/api/v1/auth/me", headers=auth_headers)
         assert response.status_code == 200
 
-    def test_forgot_password_v1(self, client):
+    def test_forgot_password_v1(self, client, tenant_catalog):
         """Test forgot password via v1 API."""
         payload = {"email": "test@example.com"}
         response = client.post("/api/v1/auth/forgot-password", json=payload)

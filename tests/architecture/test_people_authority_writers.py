@@ -150,6 +150,28 @@ class Writer:
     evidence: str
 
 
+EMPLOYMENT_TYPE_PROJECTOR = Writer(
+    path="app/services/people/hr/employment_types.py",
+    symbol="_EmploymentTypeProjector.project",
+    entities="employment_type",
+    evidence="attribute_assignment|constructor|session_add",
+)
+
+
+def _without_employment_type_projector(discovered: set[Writer]) -> set[Writer]:
+    """Partition the exact-one derived writer from remaining ERP authority."""
+    candidates = {
+        writer
+        for writer in discovered
+        if "employment_type" in writer.entities.split("|")
+    }
+    assert candidates == {EMPLOYMENT_TYPE_PROJECTOR}, (
+        "the legacy Employment Type table must have exactly one canonical "
+        f"projector; found:\n{_render(candidates) or '-'}"
+    )
+    return discovered - candidates
+
+
 def _call_name(node: ast.Call) -> str | None:
     if isinstance(node.func, ast.Name):
         return node.func.id
@@ -588,7 +610,7 @@ def _render(rows: set[Writer]) -> str:
 
 
 def test_people_authority_writer_inventory_is_exact() -> None:
-    discovered = _scan_repository()
+    discovered = _without_employment_type_projector(_scan_repository())
     recorded = _load_inventory()
 
     assert discovered == recorded, (
@@ -597,6 +619,28 @@ def test_people_authority_writer_inventory_is_exact() -> None:
         f"\n\nUnrecorded:\n{_render(discovered - recorded) or '-'}"
         f"\n\nNo longer detected:\n{_render(recorded - discovered) or '-'}"
     )
+
+
+def test_employment_type_projector_partition_is_two_directional() -> None:
+    try:
+        _without_employment_type_projector(set())
+    except AssertionError:
+        pass
+    else:  # pragma: no cover - sensitivity canary
+        raise AssertionError("a missing compatibility projector was accepted")
+
+    second_writer = Writer(
+        path="app/tasks/shadow_employment_type_projector.py",
+        symbol="shadow_project",
+        entities="employee|employment_type",
+        evidence="attribute_assignment",
+    )
+    try:
+        _without_employment_type_projector({EMPLOYMENT_TYPE_PROJECTOR, second_writer})
+    except AssertionError:
+        pass
+    else:  # pragma: no cover - sensitivity canary
+        raise AssertionError("a second compatibility projector was accepted")
 
 
 def test_writer_detector_sensitivity_covers_every_mutation_shape() -> None:

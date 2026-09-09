@@ -56,12 +56,14 @@ from app.tasks.dotmac_sub import (
     run_dotmac_sub_daily_reconciliation,
     run_dotmac_sub_full_reconciliation,
     run_dotmac_sub_incremental_sync,
+    run_dotmac_sub_incremental_sync_phase,
 )
 from app.tasks.email import send_email_async
 from app.tasks.expense import (
     calculate_expense_analytics,
     poll_stuck_expense_transfers,
     post_approved_expense,
+    reconcile_unresolved_expense_transfers,
     post_cash_advance_disbursement,
     process_expense_approval_reminders,
     refresh_period_usage_cache,
@@ -148,6 +150,7 @@ __all__ = [
     "settle_cash_advance_with_claim",
     "calculate_expense_analytics",
     "poll_stuck_expense_transfers",
+    "reconcile_unresolved_expense_transfers",
     # HR module tasks
     "process_probation_ending_notifications",
     "process_contract_expiry_notifications",
@@ -185,6 +188,7 @@ __all__ = [
     "run_staff_sync_reconcile",
     "process_dotmac_sub_webhook",
     "run_dotmac_sub_incremental_sync",
+    "run_dotmac_sub_incremental_sync_phase",
     "run_dotmac_sub_daily_reconciliation",
     "run_dotmac_sub_full_reconciliation",
     "cleanup_stale_dotmac_sub_sync_history",

@@ -39,7 +39,7 @@
 <nav class="text-sm text-slate-500 dark:text-slate-400" aria-label="Breadcrumb">
     <ol class="flex">
         <li><a href="/dashboard" class="hover:text-teal-600 dark:hover:text-teal-400 transition-colors">Dashboard</a></li>
-        <li class="flex items-center"><span class="mx-2">/</span> <a href="/people/self/attendance" class="hover:text-teal-600 dark:hover:text-teal-400 transition-colors">Self Service</a></li>
+        <li class="flex items-center"><span class="mx-2">/</span> <a href="/people/self" class="hover:text-teal-600 dark:hover:text-teal-400 transition-colors">Self Service</a></li>
         <li class="flex items-center"><span class="mx-2">/</span> <span class="text-slate-900 dark:text-white" aria-current="page">My Expenses</span></li>
     </ol>
 </nav>
@@ -64,8 +64,8 @@
             <span class="coin-particle" aria-hidden="true"></span>
             <span class="coin-particle" aria-hidden="true"></span>
             <span class="relative z-10 flex items-center gap-2">
-                <span class="inline-flex h-4 w-4 items-center justify-center rounded-full border border-amber-400 bg-amber-200">
-                    <span class="block h-2.5 w-2.5 rounded-full bg-amber-500"></span>
+                <span class="inline-flex h-4 w-4 items-center justify-center rounded-full border border-white bg-white/20">
+                    <span class="block h-2.5 w-2.5 rounded-full bg-white"></span>
                 </span>
                 New Expense
             </span>
@@ -399,7 +399,13 @@
         </td>
         <td class="px-3 py-3 align-top">
             <label class="sr-only" for="description___KEY__">Description</label>
-            <input type="text" name="description___KEY__" id="description___KEY__" class="form-input w-full min-w-[220px]" required>
+            <input type="text" name="description___KEY__" id="description___KEY__"
+                   class="form-input w-full min-w-[220px]" required maxlength="500"
+                   aria-describedby="description___KEY___counter"
+                   data-expense-description>
+            <p id="description___KEY___counter" class="field-help mt-1 text-xs" aria-live="polite">
+                <span data-description-count>0</span> / 500 characters
+            </p>
         </td>
         <td class="px-3 py-3 align-top">
             <label class="sr-only" for="claimed_amount___KEY__">Amount</label>
@@ -522,7 +528,21 @@ function addExpenseItem() {
     updateFleetRequirement();
 }
 
+function updateDescriptionCount(input) {
+    const row = input.closest('[data-expense-item]');
+    const count = row ? row.querySelector('[data-description-count]') : null;
+    if (count) {
+        count.textContent = String(input.value.length);
+    }
+}
+
 if (itemContainer) {
+    itemContainer.addEventListener('input', function(e) {
+        if (e.target.matches('[data-expense-description]')) {
+            updateDescriptionCount(e.target);
+        }
+    });
+
     itemContainer.addEventListener('click', function(e) {
         const removeButton = e.target.closest('[data-remove-item]');
         if (!removeButton) {
@@ -771,17 +791,17 @@ document.addEventListener('DOMContentLoaded', function() {
     min-width: 160px;
     padding: 0.65rem 1.1rem;
     border-radius: 0.75rem;
-    border: 1px solid rgba(251, 191, 36, 0.45);
-    background: rgba(253, 230, 138, 0.35);
-    color: #92400e;
+    border: 1px solid rgba(255, 255, 255, 0.9);
+    background: transparent;
+    color: #ffffff;
     font-weight: 600;
-    transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+    transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease, border-color 0.2s ease;
 }
 
 .coin-button:hover {
     transform: translateY(-1px);
     box-shadow: 0 10px 24px rgba(245, 158, 11, 0.2);
-    background: rgba(253, 230, 138, 0.6);
+    border-color: #c4b5fd;
 }
 
 .coin-particle {
@@ -808,12 +828,12 @@ document.addEventListener('DOMContentLoaded', function() {
 
 @media (prefers-color-scheme: dark) {
     .coin-button {
-        background: rgba(120, 53, 15, 0.35);
-        color: #fcd34d;
-        border-color: rgba(251, 191, 36, 0.3);
+        background: transparent;
+        color: #ffffff;
+        border-color: rgba(255, 255, 255, 0.9);
     }
     .coin-button:hover {
-        background: rgba(120, 53, 15, 0.55);
+        border-color: #c4b5fd;
     }
 }
 </style>

@@ -68,7 +68,7 @@ reason — identity-map contamination across tenants:
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from uuid import UUID
 
@@ -296,7 +296,7 @@ def for_each_organization(
     *,
     include_inactive: bool = False,
     only: UUID | None = None,
-) -> Iterator[tuple[UUID, Session]]:
+) -> Generator[tuple[UUID, Session], None, None]:
     """Yield ``(organization_id, tenant-scoped session)`` for each organization.
 
     This is the canonical replacement for the retired
@@ -318,6 +318,12 @@ def for_each_organization(
     organization's scope. Callers that must continue past a failing tenant
     wrap their own body in ``try/except``, which is what every task in
     ``app/tasks`` already does to collect per-org errors.
+
+    A caller that stops early (a batch budget, a ``break``) leaves one session
+    open until this generator is closed, so it is typed as a ``Generator``
+    rather than a bare ``Iterator``: ``contextlib.closing`` around the call is
+    the spelling that closes it at a known point instead of at collection.
+    See ``refresh_stale_balances`` in ``app/tasks/finance.py``.
 
     Args:
         include_inactive: passed straight to

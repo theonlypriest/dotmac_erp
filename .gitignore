@@ -36,6 +36,7 @@ env/
 # Environment variables
 .env
 .env.local
+.env.grafana-loki.local
 .env.*.local
 # Pre-deploy copy of .env written by scripts/deploy.sh (holds the same secrets).
 .env.deploy-bak

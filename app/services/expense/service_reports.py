@@ -6,7 +6,7 @@ from datetime import date
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import extract, func, select
+from sqlalchemy import extract, func, or_, select
 
 from app.models.expense import (
     CashAdvance,
@@ -486,18 +486,109 @@ class ExpenseReportingMixin(ExpenseServiceBase):
         approver_id: UUID,
         start_date: date | None = None,
         end_date: date | None = None,
+        decision: str | None = None,
+        claim_status: str | ExpenseClaimStatus | None = None,
+        employee_id: UUID | None = None,
+        include_pending: bool = False,
+        filter_by_claim_date: bool = False,
+        use_default_date_range: bool = True,
         limit: int = 200,
     ) -> dict:
         from app.models.people.hr.employee import Employee
         from app.models.person import Person
 
         today = date.today()
-        start_date = start_date or today.replace(day=1)
-        end_date = end_date or today
+        if use_default_date_range:
+            start_date = start_date or today.replace(day=1)
+            end_date = end_date or today
+
+        decision = decision.upper() if decision else None
+        if decision and decision not in {"APPROVED", "REJECTED", "PENDING"}:
+            raise ValueError("Invalid decision")
+
+        if isinstance(claim_status, ExpenseClaimStatus):
+            claim_status_value = claim_status
+        elif claim_status:
+            try:
+                claim_status_value = ExpenseClaimStatus(claim_status.upper())
+            except ValueError as exc:
+                raise ValueError("Invalid claim status") from exc
+        else:
+            claim_status_value = None
+
+        decision_conditions = [
+            ExpenseClaimApprovalStep.decision.in_(["APPROVED", "REJECTED"])
+        ]
+        if include_pending:
+            decision_conditions.append(ExpenseClaimApprovalStep.decision.is_(None))
+
+        filters = [
+            ExpenseClaim.organization_id == org_id,
+            ExpenseClaimApprovalStep.approver_id == approver_id,
+            or_(*decision_conditions),
+        ]
+
+        if decision:
+            if decision == "PENDING":
+                filters.append(ExpenseClaimApprovalStep.decision.is_(None))
+            else:
+                filters.append(ExpenseClaimApprovalStep.decision == decision)
+                filters.append(ExpenseClaimApprovalStep.decided_at.is_not(None))
+        elif not include_pending:
+            filters.append(ExpenseClaimApprovalStep.decided_at.is_not(None))
+
+        if claim_status_value is not None:
+            filters.append(ExpenseClaim.status == claim_status_value)
+        if employee_id is not None:
+            filters.append(ExpenseClaim.employee_id == employee_id)
+
+        date_column = (
+            ExpenseClaim.claim_date
+            if filter_by_claim_date
+            else func.date(ExpenseClaimApprovalStep.decided_at)
+        )
+        if start_date is not None:
+            filters.append(date_column >= start_date)
+        if end_date is not None:
+            filters.append(date_column <= end_date)
+
+        activity_at = func.coalesce(
+            ExpenseClaimApprovalStep.decided_at,
+            ExpenseClaim.updated_at,
+            ExpenseClaim.created_at,
+        ).label("activity_at")
+        employee_rows = self.db.execute(
+            select(
+                ExpenseClaim.employee_id,
+                Person.name_expr().label("claimant_name"),
+            )
+            .join(
+                ExpenseClaim,
+                ExpenseClaim.claim_id == ExpenseClaimApprovalStep.claim_id,
+            )
+            .outerjoin(Employee, Employee.employee_id == ExpenseClaim.employee_id)
+            .outerjoin(Person, Person.id == Employee.person_id)
+            .where(
+                ExpenseClaim.organization_id == org_id,
+                ExpenseClaimApprovalStep.approver_id == approver_id,
+                or_(*decision_conditions),
+            )
+            .distinct()
+            .order_by(Person.name_expr())
+        ).all()
+        employee_options = [
+            {
+                "employee_id": str(row.employee_id),
+                "name": row.claimant_name or "Unknown",
+            }
+            for row in employee_rows
+        ]
         rows = self.db.execute(
             select(
+                activity_at,
                 ExpenseClaimApprovalStep.decided_at.label("action_at"),
                 ExpenseClaimApprovalStep.decision.label("action_type"),
+                ExpenseClaim.employee_id,
                 ExpenseClaim.claim_id,
                 ExpenseClaim.claim_number,
                 ExpenseClaim.claim_date,
@@ -514,43 +605,55 @@ class ExpenseReportingMixin(ExpenseServiceBase):
             )
             .outerjoin(Employee, Employee.employee_id == ExpenseClaim.employee_id)
             .outerjoin(Person, Person.id == Employee.person_id)
-            .where(
-                ExpenseClaim.organization_id == org_id,
-                ExpenseClaimApprovalStep.approver_id == approver_id,
-                ExpenseClaimApprovalStep.decision.in_(["APPROVED", "REJECTED"]),
-                ExpenseClaimApprovalStep.decided_at.is_not(None),
-                func.date(ExpenseClaimApprovalStep.decided_at) >= start_date,
-                func.date(ExpenseClaimApprovalStep.decided_at) <= end_date,
+            .where(*filters)
+            .order_by(
+                activity_at.desc(),
+                ExpenseClaim.claim_date.desc(),
+                ExpenseClaim.claim_number.desc(),
             )
-            .order_by(ExpenseClaimApprovalStep.decided_at.desc())
             .limit(limit)
         ).all()
 
         decisions = []
         approved_count = 0
         rejected_count = 0
+        pending_count = 0
+        paid_count = 0
         approved_total = Decimal("0")
         rejected_total = Decimal("0")
+        pending_total = Decimal("0")
+        paid_total = Decimal("0")
         for row in rows:
-            action_type = row.action_type
+            action_type = row.action_type or "PENDING"
             claimed_amount = row.total_claimed_amount or Decimal("0")
             approved_amount = row.total_approved_amount or Decimal("0")
+            status_value = getattr(row.status, "value", row.status)
             if action_type == "APPROVED":
                 approved_count += 1
                 approved_total += approved_amount
-            else:
+            elif action_type == "REJECTED":
                 rejected_count += 1
                 rejected_total += claimed_amount
+            else:
+                pending_count += 1
+                pending_total += claimed_amount
+            if status_value == ExpenseClaimStatus.PAID.value:
+                paid_count += 1
+                paid_total += approved_amount
+
+            claimant_name = row.claimant_name or "Unknown"
             decisions.append(
                 {
+                    "activity_at": row.activity_at,
                     "action_at": row.action_at,
                     "action_type": action_type,
+                    "employee_id": row.employee_id,
                     "claim_id": row.claim_id,
                     "claim_number": row.claim_number,
                     "claim_date": row.claim_date,
-                    "status": row.status.value if row.status else None,
+                    "status": status_value,
                     "purpose": row.purpose,
-                    "claimant_name": row.claimant_name or "Unknown",
+                    "claimant_name": claimant_name,
                     "currency_code": self._resolve_currency_code(
                         org_id, row.currency_code
                     ),
@@ -564,6 +667,11 @@ class ExpenseReportingMixin(ExpenseServiceBase):
             "decisions": decisions,
             "approved_count": approved_count,
             "rejected_count": rejected_count,
+            "pending_count": pending_count,
+            "paid_count": paid_count,
             "approved_total": approved_total,
             "rejected_total": rejected_total,
+            "pending_total": pending_total,
+            "paid_total": paid_total,
+            "employee_options": employee_options,
         }

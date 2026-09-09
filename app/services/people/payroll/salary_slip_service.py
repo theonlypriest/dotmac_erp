@@ -23,7 +23,6 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.people.hr.employee import Employee
-from app.models.people.hr.employment_type import EmploymentType
 from app.models.people.payroll.salary_assignment import SalaryStructureAssignment
 from app.models.people.payroll.salary_component import (
     SalaryComponent,
@@ -39,6 +38,9 @@ from app.models.people.payroll.salary_structure import SalaryStructure
 from app.services.common import coerce_uuid
 from app.services.people.payroll.eligibility import (
     is_employee_payroll_eligible_for_period,
+)
+from app.services.people.payroll.employment_type_classification import (
+    classify_payroll_employment_type,
 )
 from app.services.people.payroll.paye_calculator import PAYEBreakdown, PAYECalculator
 
@@ -93,21 +95,12 @@ class SalarySlipService:
         employee: Employee,
         structure: SalaryStructure,
     ) -> bool:
-        employment_type = employee.employment_type
-        if employment_type is None and employee.employment_type_id:
-            employment_type = db.get(EmploymentType, employee.employment_type_id)
-
-        type_code = (
-            (employment_type.type_code or "").strip().lower() if employment_type else ""
+        classification = classify_payroll_employment_type(
+            db,
+            organization_id=employee.organization_id,
+            employment_type_id=employee.employment_type_id,
         )
-        type_name = (
-            (employment_type.type_name or "").strip().lower() if employment_type else ""
-        )
-        is_contract = type_code == "contract" or type_name == "contract"
-        is_contract_structure = (
-            structure.structure_name or ""
-        ).strip().lower() == "contract staff"
-        return is_contract or is_contract_structure
+        return classification.is_contract_staff(structure_name=structure.structure_name)
 
     @staticmethod
     def _collect_pension_base_components(

@@ -7,6 +7,7 @@ Provides context and update functions for HR/People settings UI pages.
 import logging
 import mimetypes
 import uuid
+from inspect import isawaitable
 from typing import Any
 
 from sqlalchemy import select
@@ -91,6 +92,12 @@ COMMON_TIMEZONES = [
 ]
 
 
+async def _maybe_await(value: Any) -> Any:
+    if isawaitable(value):
+        return await value
+    return value
+
+
 class PeopleSettingsWebService:
     """Service for People/HR Settings UI."""
 
@@ -141,9 +148,11 @@ class PeopleSettingsWebService:
     ) -> dict[str, Any]:
         """Get HR settings for editing."""
         async with tenant_context(db, organization_id):
-            result = await db.execute(
-                select(Organization).where(
-                    Organization.organization_id == organization_id
+            result = await _maybe_await(
+                db.execute(
+                    select(Organization).where(
+                        Organization.organization_id == organization_id
+                    )
                 )
             )
             org = result.scalar_one_or_none()
@@ -152,11 +161,13 @@ class PeopleSettingsWebService:
 
         # Get locations with geofence status for geofencing configuration
         async with tenant_context(db, organization_id):
-            locations_result = await db.execute(
-                select(Location)
-                .where(Location.organization_id == organization_id)
-                .where(Location.is_active == True)
-                .order_by(Location.location_name)
+            locations_result = await _maybe_await(
+                db.execute(
+                    select(Location)
+                    .where(Location.organization_id == organization_id)
+                    .where(Location.is_active == True)
+                    .order_by(Location.location_name)
+                )
             )
             locations = locations_result.scalars().all()
 
@@ -232,9 +243,11 @@ class PeopleSettingsWebService:
         ]
 
         async with tenant_context(db, organization_id):
-            result = await db.execute(
-                select(Organization).where(
-                    Organization.organization_id == organization_id
+            result = await _maybe_await(
+                db.execute(
+                    select(Organization).where(
+                        Organization.organization_id == organization_id
+                    )
                 )
             )
             org = result.scalar_one_or_none()
@@ -258,7 +271,7 @@ class PeopleSettingsWebService:
                             value = None
                     setattr(org, field, value)
 
-            await db.commit()
+            await _maybe_await(db.commit())
         return True, None
 
     async def update_default_invite_attachment(
@@ -330,9 +343,11 @@ class PeopleSettingsWebService:
     ) -> dict[str, Any]:
         """Get organization profile (read-only view for HR users)."""
         async with tenant_context(db, organization_id):
-            result = await db.execute(
-                select(Organization).where(
-                    Organization.organization_id == organization_id
+            result = await _maybe_await(
+                db.execute(
+                    select(Organization).where(
+                        Organization.organization_id == organization_id
+                    )
                 )
             )
             org = result.scalar_one_or_none()

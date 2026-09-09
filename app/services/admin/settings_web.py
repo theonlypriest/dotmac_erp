@@ -9,7 +9,7 @@ import logging
 import uuid
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.domain_settings import SettingDomain, SettingValueType
@@ -94,16 +94,10 @@ ADMIN_SETTINGS_SECTIONS = [
         "icon": "flag",
     },
     {
-        "title": "Service Hooks",
-        "description": "Configure outbound hooks for domain events",
-        "url": "/admin/settings/service-hooks",
+        "title": "Integrations",
+        "description": "Inbound providers, service connections, and outbound hooks",
+        "url": "/admin/settings/integrations",
         "icon": "link",
-    },
-    {
-        "title": "Payments",
-        "description": "Payment gateway integration",
-        "url": "/admin/settings/payments",
-        "icon": "credit-card",
     },
     {
         "title": "Coach / AI",
@@ -626,6 +620,65 @@ class AdminSettingsWebService:
         ]
 
         return {"providers": providers}
+
+    def get_integrations_context(
+        self, db: Session, organization_id: uuid.UUID
+    ) -> dict[str, Any]:
+        """Build one control-plane hub without surfacing stored credentials."""
+        from app.models.finance.platform.service_hook import ServiceHook
+        from app.models.sync import IntegrationConfig, IntegrationType
+
+        paystack_enabled = bool(
+            resolve_value(db, SettingDomain.payments, "paystack_enabled")
+        )
+        sub_configured = bool(
+            db.scalar(
+                select(IntegrationConfig.config_id).where(
+                    IntegrationConfig.organization_id == organization_id,
+                    IntegrationConfig.integration_type == IntegrationType.DOTMAC_SUB,
+                    IntegrationConfig.is_active.is_(True),
+                    IntegrationConfig.api_key.is_not(None),
+                    IntegrationConfig.api_key != "",
+                )
+            )
+        )
+        active_hooks = int(
+            db.scalar(
+                select(func.count(ServiceHook.hook_id)).where(
+                    ServiceHook.organization_id == organization_id,
+                    ServiceHook.is_active.is_(True),
+                )
+            )
+            or 0
+        )
+        return {
+            "integrations": [
+                {
+                    "name": "Paystack inbound payments",
+                    "description": "Credentials, ERP ingress URL, and the verified relay to Dotmac Sub.",
+                    "url": "/admin/settings/payments/paystack",
+                    "configured": paystack_enabled,
+                    "direction": "Inbound → ERP → Dotmac Sub",
+                    "icon": "credit-card",
+                },
+                {
+                    "name": "Dotmac Sub",
+                    "description": "Scoped service API key, sync health, and connection verification.",
+                    "url": "/admin/sync/dotmac-sub/config",
+                    "configured": sub_configured,
+                    "direction": "Two-way service integration",
+                    "icon": "refresh",
+                },
+                {
+                    "name": "Outbound service hooks",
+                    "description": "ERP-owned subscriptions that deliver domain events to external URLs.",
+                    "url": "/admin/settings/service-hooks",
+                    "configured": active_hooks > 0,
+                    "direction": f"Outbound only · {active_hooks} active",
+                    "icon": "link",
+                },
+            ]
+        }
 
     def get_paystack_context(
         self, db: Session, organization_id: uuid.UUID

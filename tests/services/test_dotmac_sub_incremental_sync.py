@@ -19,6 +19,9 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
+import pytest
+from sqlalchemy.exc import OperationalError
+
 from app.models.finance.ar.external_sync import EntityType
 from app.services.dotmac_sub.client import (
     DotmacSubClient,
@@ -30,6 +33,7 @@ from app.services.dotmac_sub.client import (
     _watermark_params,
 )
 from app.services.dotmac_sub.sync._base import BaseSyncMixin, next_watermark
+from app.services.dotmac_sub.sync._invoices import InvoiceSyncMixin
 from app.services.dotmac_sub.sync._invoices import _invoice_hash_payload
 from app.services.dotmac_sub.sync._resellers import ResellerSyncMixin
 from app.services.dotmac_sub.sync._subscribers import SubscriberSyncMixin
@@ -180,6 +184,10 @@ class _ResellerSyncHarness(ResellerSyncMixin):
     pass
 
 
+class _InvoiceSyncHarness(InvoiceSyncMixin):
+    pass
+
+
 def test_subscriber_sync_advances_customer_watermark() -> None:
     harness = _SubscriberSyncHarness()
     harness.db = MagicMock()
@@ -232,6 +240,38 @@ def test_reseller_sync_advances_reseller_watermark() -> None:
         EntityType.RESELLER,
         datetime(2026, 1, 3, 12, tzinfo=UTC),
     )
+
+
+def test_invoice_sync_aborts_on_database_connection_error() -> None:
+    invoice = InvoiceRecord(
+        id="inv-db-error",
+        account_id="acct-1",
+        invoice_number="INV-DB-ERROR",
+        status="issued",
+        currency="NGN",
+        subtotal=100,
+        tax_total=0,
+        total=100,
+        balance_due=100,
+        updated_at=datetime(2026, 1, 2, 12, tzinfo=UTC),
+    )
+    harness = _InvoiceSyncHarness()
+    harness.db = MagicMock()
+    harness.db.begin_nested.side_effect = OperationalError(
+        "SAVEPOINT sa_savepoint_1",
+        {},
+        Exception("another command is already in progress"),
+    )
+    harness.client = MagicMock()
+    harness.client.get_invoices.return_value = [invoice]
+    harness._get_sync_watermark = MagicMock(return_value=None)
+    harness._advance_sync_watermark = MagicMock()
+
+    with pytest.raises(OperationalError):
+        harness.sync_invoices()
+
+    harness.db.rollback.assert_called_once_with()
+    harness._advance_sync_watermark.assert_not_called()
 
 
 def test_parse_invoice_reads_updated_at() -> None:

@@ -27,6 +27,13 @@ _VIEW_RE = re.compile(r"^[a-z_][a-z0-9_]*(\.[a-z_][a-z0-9_]*)?$")
 _AGG_RE = re.compile(r"^(sum|count|avg|min|max)$", re.IGNORECASE)
 logger = logging.getLogger(__name__)
 
+# Refresh authority stays with the migration owner. Every supported materialized
+# view needs an explicit, fixed-purpose SECURITY DEFINER bridge installed by a
+# migration; a database value may never be interpolated into owner-executed SQL.
+_REFRESH_FUNCTIONS = {
+    "rpt.sales_analysis_mv": "rpt.refresh_sales_analysis_mv",
+}
+
 
 @dataclass(frozen=True)
 class CubeQueryResult:
@@ -187,6 +194,11 @@ class AnalysisCubeService:
         whole loop in one healthy transaction.
         """
         view_name = self._safe_view(cube.source_view)
+        refresh_function = _REFRESH_FUNCTIONS.get(view_name)
+        if refresh_function is None:
+            raise RuntimeError(
+                f"Materialized view {view_name} has no approved refresh function"
+            )
         schema_name, _, relation_name = view_name.partition(".")
         if not relation_name:
             relation_name = schema_name
@@ -206,10 +218,10 @@ class AnalysisCubeService:
                 "did you run the migration that creates it?"
             )
 
-        if is_populated:
-            self.db.execute(text(f"REFRESH MATERIALIZED VIEW CONCURRENTLY {view_name}"))
-        else:
-            self.db.execute(text(f"REFRESH MATERIALIZED VIEW {view_name}"))
+        self.db.execute(
+            text(f"SELECT {refresh_function}(:use_concurrently)"),
+            {"use_concurrently": bool(is_populated)},
+        )
         cube.last_refreshed_at = now or datetime.now(UTC)
 
     def _get_cube(self, organization_id: UUID, cube_code: str) -> AnalysisCube:

@@ -192,8 +192,7 @@ class DotmacSubSyncWebService:
         auth: WebAuthContext | None,
         *,
         base_url: str,
-        username: str,
-        password: str,
+        api_token: str,
         webhook_secret: str,
     ) -> RedirectResponse:
         err = self._require_admin(request, auth)
@@ -207,28 +206,28 @@ class DotmacSubSyncWebService:
                 status_code=302,
             )
         try:
-            # IntegrationConfig mapping: company=username, api_key=password,
-            # api_secret=webhook secret. The bearer JWT is obtained at runtime
-            # via session login (DotmacSubClient), so no token is stored.
+            # api_key is a scoped service key; staff-session credentials are
+            # deliberately not accepted by DotmacSubClient.
             svc = IntegrationConfigService(db)
             existing = svc.get_config(org_id, IntegrationType.DOTMAC_SUB)
             if existing:
                 svc.update_credentials(
                     org_id,
                     IntegrationType.DOTMAC_SUB,
-                    api_key=password or None,
+                    api_key=api_token or None,
                     api_secret=webhook_secret or None,
                     base_url=base_url or None,
-                    company=username or None,
                 )
             else:
+                if not api_token:
+                    raise ValueError("A scoped Dotmac Sub service API key is required")
                 svc.create_config(
                     organization_id=org_id,
                     integration_type=IntegrationType.DOTMAC_SUB,
                     base_url=base_url,
-                    api_key=password,
+                    api_key=api_token,
                     api_secret=webhook_secret,
-                    company=username,
+                    company=None,
                     user_id=auth.user_id if auth else None,
                 )
             db.commit()

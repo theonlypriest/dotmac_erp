@@ -33,11 +33,18 @@ semantics.
 | `audit_trail` | manual business audit (as-built; fragmented) | No NEW audit writer until the four existing mechanisms consolidate (finding 1) |
 | `general_ledger` | single poster, period guards, sequences, FX, tax policy | GL only via posting adapters; posted lines immutable; balances are cache |
 | `platform_events` | transactional outbox (claim/lease, retry, dead-letter, replay), service hooks | Consequences ride the outbox; the relay owns commits (claim/deliver/settle, token-gated); unknown events dead-letter unless declared no-consequence; handlers never commit |
-| `payment_execution` | payment-intent status (every transition), transfer initiation/completion/failure/reversal, scheduled reconciliation | One service decides what a payment intent's status is; webhooks, routes and schedulers validate, authorize and delegate |
+| `payment_execution` | payment-intent status (every transition), transfer initiation/completion/failure/reversal, scheduled reconciliation, the observed-verdict vs unobserved-outcome distinction | One service decides what a payment intent's status is **and may only claim what was observed**; webhooks, routes and schedulers validate, authorize and delegate |
 | `commercial_licensing` | license gates | Gates module availability, never data integrity (placeholder-key finding 3 pending) |
 | `external_sync` | Sub AR ingestion, Sub operational-context projections, ERP material support and source-qualified correlations | External systems are transports or contracted authorities; mirrors are rebuildable |
 | `bulk_imports` | durable run/partition ledger; customer field, validation and mutation port | Shared mechanics own progress and evidence; ERP owns what a row means |
 | `platform_services` | storage, secrets (OpenBao pointers), notifications | One owner per capability |
+
+The database-backed `ScheduledTask` row is the sole schedule owner for
+`app.tasks.dotmac_sub.run_dotmac_sub_incremental_sync`; the builtin Celery beat
+schedule must not dispatch the same task in parallel. The task also owns a
+per-organization PostgreSQL advisory single-flight lock and bounded execution
+time, so connector latency or authentication failure cannot consume the shared
+worker pool. Celery remains the transport and does not decide sync state.
 
 Service API keys authenticate an identity but receive no authority unless an
 operator assigns at least one explicit leaf scope. NULL or empty scope lists are
@@ -51,7 +58,7 @@ deployment-safe, additive migration contract and the reason subtractive
 reconciliation is not yet safe are documented in
 `docs/architecture/permission-provisioning-boundary.md`.
 
-## Payment execution (ADR-0005)
+## Payment execution (ADR-0005, ADR-0007)
 
 `app.services.finance.payments.payment_service.PaymentService` is the **sole
 writer** of `payments.payment_intent.status`. It had three writers until
@@ -60,8 +67,9 @@ writer** of `payments.payment_intent.status`. It had three writers until
 read taken in a different session), and the dead `BatchTransferService`, which
 was deleted.
 
-The job is now an adapter: cross-tenant discovery, one `session_for_org` per
-tenant, and aggregation. Selection predicates, credential resolution, the
+The job is now an adapter: tenant enumeration through `for_each_organization`,
+one `session_for_org` per tenant with the selections running inside it, and
+aggregation. Selection predicates, credential resolution, the
 PENDING-to-PROCESSING promotion, attempt counting and the circuit breaker are
 `PaymentService`'s. Both scheduled entry points
 (`expire_stale_pending_transfer`, `reconcile_stuck_transfer`) take an intent
@@ -78,6 +86,42 @@ Enforced by `tests/architecture/test_payment_intent_status_single_owner.py`.
 Note that `PaymentService` raises `HTTPException` throughout — a pre-existing
 deviation from the HTTP-adapter rule above, predating this slice and not
 resolved by it.
+
+### What the column may claim (ADR-0007)
+
+Owning the write is not the same as owning the meaning. Every
+`PaymentIntentStatus` member except one asserts a fact about the money, and
+`FAILED` in particular is a claim that the payout did not happen — downstream,
+the claim reverts to APPROVED, the intent becomes resettable, and the operator
+is told to try again. Until 2026-08-25 that value was also what the system
+wrote when it simply could not tell: a connect timeout, a 5xx, ten spent poll
+attempts with no answer, or a provider status word it did not parse.
+
+`INDETERMINATE` (+ `unresolved_since`) is the vocabulary for *unobserved*. ERP
+is adopting the fleet rule stated in `dotmac_starter_mt` ADR-0032 — unobserved
+is UNKNOWN, never ABSENT — for money movement.
+
+- `app.services.finance.payments.paystack_client` owns the transport-level
+  half: `PaystackUnreachable` for "Paystack did not answer" (every
+  `httpx.RequestError` site, every 5xx), plain `PaystackError` for "Paystack
+  answered and refused".
+- `PaymentService` owns the decision half. `FAILED` on the give-up path
+  requires that Paystack answered; everything else is `INDETERMINATE`, and the
+  classifier is inverted so the safe answer is the default rather than the
+  remembered case.
+- `resolve_indeterminate_transfer` (driven hourly by
+  `app.tasks.expense.reconcile_unresolved_expense_transfers`) is the **only**
+  writer that may move an intent out of `INDETERMINATE`, and only to a status
+  Paystack itself justified. No attempt cap and no give-up branch: a budget
+  there would manufacture a verdict out of repeated silence.
+- An `INDETERMINATE` intent is never resettable — `force` included — and blocks
+  a new payout for the same claim. The claim stays APPROVED and unpaid, and no
+  GL journal is posted.
+- The initiate route answers `409`, not `502`: 5xx is in every default retry
+  set, and retrying a payout whose outcome is unknown is the double-payment
+  path.
+
+Enforced by `tests/architecture/test_unobserved_is_not_a_verdict.py`.
 
 Implemented and tested; production enablement unconfirmed.
 
@@ -96,6 +140,25 @@ partition if its row verdict differs from the retiring `CustomerImporter`.
 Apply is unavailable until the durable dry run is complete and error-free.
 Provider reads occur between the claim transaction and the settlement
 transaction, so storage latency never extends a partition lease transaction.
+
+## Persistent byte outputs
+
+`app.services.storage.S3StorageService` is ERP's one concrete MinIO/S3 writer.
+`app.services.file_upload.FileUploadService` supplies typed admission and opaque
+object references to legacy domain owners; `DotmacFilesS3Provider` wraps that
+same concrete owner where the composed `dotmac-files` lifecycle has been
+adopted. Neither path authorizes a second provider, a container-filesystem
+writer or a named-volume fallback.
+
+The H2 repair routes the remaining confirmed durable local writers through that
+owner: People HR handbook bytes (`hr_documents/`), finance report-instance JSON
+(`generated_reports/`) and automation-generated PDFs (`generated_docs/`). The
+domain rows continue to own document/report meaning and store only an opaque S3
+key (or `s3://` reference where the established report contract uses a URL-like
+locator). Object upload must succeed before a domain row is completed; a
+provider failure is unavailable, never "missing", and never triggers a local
+write. This physical-storage repair does not transfer handbook lifecycle to
+`dotmac-documents` or claim a new `dotmac-files` domain-lifecycle cutover.
 
 ## Clean-instance cutover and legacy history
 

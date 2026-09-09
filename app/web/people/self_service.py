@@ -1442,6 +1442,10 @@ def reject_team_leave(
 def team_expense_requests(
     request: Request,
     status: str | None = None,
+    decision: str | None = None,
+    employee_id: UUID | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
     page: int = Query(default=1, ge=1),
     auth: WebAuthContext = Depends(require_self_service_expense_approver),
     db: Session = Depends(get_db_for_org),
@@ -1452,6 +1456,10 @@ def team_expense_requests(
         auth,
         db,
         status=status,
+        decision=decision,
+        employee_id=employee_id,
+        start_date=start_date,
+        end_date=end_date,
         page=page,
     )
 
@@ -1460,6 +1468,10 @@ def team_expense_requests(
 def my_expense_approvals(
     request: Request,
     status: str | None = None,
+    decision: str | None = None,
+    employee_id: UUID | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
     page: int = Query(default=1, ge=1),
     auth: WebAuthContext = Depends(require_self_service_expense_approver),
     db: Session = Depends(get_db_for_org),
@@ -1470,6 +1482,10 @@ def my_expense_approvals(
         auth,
         db,
         status=status,
+        decision=decision,
+        employee_id=employee_id,
+        start_date=start_date,
+        end_date=end_date,
         page=page,
     )
 

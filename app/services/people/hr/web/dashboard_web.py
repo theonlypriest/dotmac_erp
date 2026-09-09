@@ -20,13 +20,13 @@ from app.models.people.hr import (
     Department,
     Employee,
     EmployeeStatus,
-    EmploymentType,
 )
 from app.models.people.leave import LeaveApplication
 from app.models.people.payroll import SalarySlip
 from app.models.people.recruit import Interview, JobApplicant, JobOffer, JobOpening
 from app.models.person import Person
 from app.services.common import coerce_uuid
+from app.services.people.hr.employment_types import EmploymentTypeService
 from app.templates import templates
 
 if TYPE_CHECKING:
@@ -693,24 +693,35 @@ class PeopleDashboardService:
     ) -> list[dict[str, Any]]:
         """Get employee count by employment type."""
         results = db.execute(
-            select(EmploymentType.type_name, func.count(Employee.employee_id))
-            .join(
-                Employee,
-                Employee.employment_type_id == EmploymentType.employment_type_id,
-            )
+            select(Employee.employment_type_id, func.count(Employee.employee_id))
             .where(
                 and_(
                     Employee.organization_id == org_id,
                     Employee.status != EmployeeStatus.TERMINATED,
                     Employee.status == EmployeeStatus.ACTIVE,
+                    Employee.employment_type_id.is_not(None),
                 )
             )
-            .group_by(EmploymentType.type_name)
-            .order_by(func.count(Employee.employee_id).desc())
+            .group_by(Employee.employment_type_id)
         ).all()
 
+        names_by_id = {
+            employment_type.employment_type_id: employment_type.type_name
+            for employment_type in EmploymentTypeService(db, org_id).iter_all()
+        }
+        counts_by_name: dict[str, int] = {}
+        for employment_type_id, count in results:
+            if employment_type_id is None:
+                continue
+            name = names_by_id[employment_type_id]
+            counts_by_name[name] = counts_by_name.get(name, 0) + count
+
         return [
-            {"type": name or "Unspecified", "count": count} for name, count in results
+            {"type": name, "count": count}
+            for name, count in sorted(
+                counts_by_name.items(),
+                key=lambda item: (-item[1], item[0].casefold(), item[0]),
+            )
         ]
 
     def _get_pending_approvals(self, db: Session, org_id: UUID) -> dict[str, Any]:

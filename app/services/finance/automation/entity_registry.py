@@ -167,6 +167,43 @@ _ENTITY_REGISTRY: dict[str, tuple[str, str, str]] = {
     ),
 }
 
+# Fields the automation engine must NEVER write, keyed by entity type.
+#
+# `_action_update_field` loads an entity generically and `setattr`s whatever
+# field a rule names.  That is unbounded by construction: any column of any
+# registered entity is reachable from a workflow rule, including columns a named
+# service owns exclusively.  This map is the gate.
+#
+# Each entry is `field name -> the owner that may write it`.  The action fails
+# with the owner's name in the message, so an operator who hits it is told where
+# the write belongs rather than that it is merely forbidden.
+#
+# A field listed here does not have to exist on the model.  `amount_received` and
+# `amount_invoiced` were REMOVED from `ap.purchase_order` — they are derived by
+# `purchase_order_amounts` and stored nowhere.  Naming them keeps a re-added
+# column from being writable by a rule the moment it reappears.
+_PROTECTED_FIELDS: dict[str, dict[str, str]] = {
+    "PURCHASE_ORDER": {
+        "amount_received": "app.services.finance.ap.purchase_order_amounts (derived)",
+        "amount_invoiced": "app.services.finance.ap.purchase_order_amounts (derived)",
+    },
+}
+
+
+def field_authority_owner(entity_type: str, field_name: str) -> str | None:
+    """Return the owner of `field_name`, or `None` if the engine may write it.
+
+    A non-`None` return means a named service owns the field exclusively and the
+    automation engine must refuse the write.
+    """
+    return _PROTECTED_FIELDS.get(entity_type, {}).get(field_name)
+
+
+def protected_fields(entity_type: str) -> frozenset[str]:
+    """The fields the automation engine may not write for `entity_type`."""
+    return frozenset(_PROTECTED_FIELDS.get(entity_type, {}))
+
+
 # Cache resolved model classes to avoid repeated imports
 _resolved_models: dict[str, type[Any] | None] = {}
 

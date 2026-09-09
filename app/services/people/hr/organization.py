@@ -1,9 +1,8 @@
-"""Organization service - business logic for departments, designations, and related entities.
+"""Organization service for departments, designations, and related entities.
 
 This service encapsulates organization structure business logic:
 - Department CRUD and hierarchy
 - Designation CRUD
-- Employment Type CRUD
 - Employee Grade CRUD
 
 Routes should call this service and control the transaction boundary.
@@ -33,7 +32,6 @@ from app.models.people.hr import (
     Employee,
     EmployeeGrade,
     EmployeeStatus,
-    EmploymentType,
 )
 from app.services.common import PaginatedResult, PaginationParams, paginate
 
@@ -44,7 +42,6 @@ from .errors import (
     DepartmentNotFoundError,
     DesignationNotFoundError,
     EmployeeGradeNotFoundError,
-    EmploymentTypeNotFoundError,
     LocationNotFoundError,
     ValidationError,
 )
@@ -61,9 +58,6 @@ from .organization_types import (
     EmployeeGradeCreateData,
     EmployeeGradeFilters,
     EmployeeGradeUpdateData,
-    EmploymentTypeCreateData,
-    EmploymentTypeFilters,
-    EmploymentTypeUpdateData,
 )
 
 logger = logging.getLogger(__name__)
@@ -782,130 +776,6 @@ class OrganizationService:
             on_leave=status_counts.get(EmployeeStatus.ON_LEAVE, 0),
             terminated=status_counts.get(EmployeeStatus.TERMINATED, 0),
         )
-
-    # =========================================================================
-    # Employment Type Methods
-    # =========================================================================
-
-    def list_employment_types(
-        self,
-        filters: EmploymentTypeFilters | None = None,
-        pagination: PaginationParams | None = None,
-    ) -> PaginatedResult[EmploymentType]:
-        """List employment types with filters and pagination."""
-        if filters is None:
-            filters = EmploymentTypeFilters()
-        if pagination is None:
-            pagination = PaginationParams()
-
-        stmt = select(EmploymentType).where(
-            EmploymentType.organization_id == self.organization_id,
-        )
-
-        if filters.is_active is not None:
-            stmt = stmt.where(EmploymentType.is_active == filters.is_active)
-
-        if filters.search:
-            search_term = f"%{filters.search}%"
-            stmt = stmt.where(
-                or_(
-                    EmploymentType.type_name.ilike(search_term),
-                    EmploymentType.type_code.ilike(search_term),
-                )
-            )
-
-        stmt = stmt.order_by(EmploymentType.type_name.asc())
-
-        return paginate(self.db, stmt, pagination)
-
-    def get_employment_type(self, employment_type_id: uuid.UUID) -> EmploymentType:
-        """Get an employment type by ID."""
-        stmt = select(EmploymentType).where(
-            EmploymentType.employment_type_id == employment_type_id,
-            EmploymentType.organization_id == self.organization_id,
-        )
-        employment_type = self.db.scalar(stmt)
-
-        if not employment_type:
-            raise EmploymentTypeNotFoundError(employment_type_id)
-
-        return employment_type
-
-    def get_employment_type_by_code(self, code: str) -> EmploymentType | None:
-        """Get an employment type by code."""
-        return self.db.scalar(
-            select(EmploymentType).where(
-                EmploymentType.type_code == code,
-                EmploymentType.organization_id == self.organization_id,
-            )
-        )
-
-    def create_employment_type(self, data: EmploymentTypeCreateData) -> EmploymentType:
-        """Create a new employment type."""
-        existing = self.get_employment_type_by_code(data.type_code)
-        if existing:
-            raise ValidationError(
-                f"Employment type with code '{data.type_code}' already exists"
-            )
-
-        employment_type = EmploymentType(
-            organization_id=self.organization_id,
-            type_code=data.type_code,
-            type_name=data.type_name,
-            description=data.description,
-            is_active=data.is_active,
-            created_by_id=self.principal.id if self.principal else None,
-        )
-
-        self.db.add(employment_type)
-        self.db.flush()
-
-        return employment_type
-
-    def update_employment_type(
-        self, employment_type_id: uuid.UUID, data: EmploymentTypeUpdateData
-    ) -> EmploymentType:
-        """Update an existing employment type."""
-        employment_type = self.get_employment_type(employment_type_id)
-
-        if data.type_code is not None:
-            existing = self.get_employment_type_by_code(data.type_code)
-            if existing and existing.employment_type_id != employment_type_id:
-                raise ValidationError(
-                    f"Employment type with code '{data.type_code}' already exists"
-                )
-            employment_type.type_code = data.type_code
-
-        if data.type_name is not None:
-            employment_type.type_name = data.type_name
-
-        if data.description is not None:
-            employment_type.description = data.description
-
-        if data.is_active is not None:
-            employment_type.is_active = data.is_active
-
-        employment_type.updated_at = datetime.now(UTC)
-        employment_type.updated_by_id = self.principal.id if self.principal else None
-
-        return employment_type
-
-    def delete_employment_type(self, employment_type_id: uuid.UUID) -> None:
-        """Delete an employment type (hard delete if no employees assigned)."""
-        employment_type = self.get_employment_type(employment_type_id)
-
-        employee_count = self.db.scalar(
-            select(func.count(Employee.employee_id)).where(
-                Employee.employment_type_id == employment_type_id,
-                Employee.status != EmployeeStatus.TERMINATED,
-            )
-        )
-        if employee_count and employee_count > 0:
-            raise ValidationError(
-                f"Cannot delete employment type with {employee_count} employees assigned"
-            )
-
-        self.db.delete(employment_type)
 
     # =========================================================================
     # Employee Grade Methods

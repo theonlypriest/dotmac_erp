@@ -1,0 +1,48 @@
+{
+  "_comment": "Alert thresholds for the Starter reference deployment. These live HERE and not in the process, because 'how late is too late' is a deployment's decision and a number compiled into the code would fork from the rule that fires on it (dotmac_integrator AGENTS.md rule 19). The foundation supplies defaults for the 13 infrastructure-shaped placeholders; every value below is one only this product can answer.",
+
+  "error_rate_warning_pct": "0.02",
+  "error_rate_critical_pct": "0.05",
+  "latency_p99_warning_seconds": "2.0",
+
+  "pool_saturation_pct": "0.80",
+  "lock_wait_seconds": "30",
+  "long_transaction_seconds": "300",
+  "replication_lag_seconds": "60",
+  "pg_data_mount": "/var/lib/postgresql/data",
+  "pg_disk_critical_pct": "0.10",
+
+  "redis_memory_pct": "0.85",
+  "redis_persistence_stale_seconds": "900",
+  "queue_depth_threshold": "5000",
+
+  "backlog_threshold": "1000",
+  "failure_rate_pct": "0.05",
+  "heartbeat_stale_seconds": "600",
+  "poison_job_count": "5",
+  "scheduler_tick_stale_seconds": "900",
+
+  "outbox_backlog_threshold": "500",
+  "outbox_retry_age_seconds": "1800",
+  "inbox_backlog_threshold": "500",
+  "inbox_retry_age_seconds": "1800",
+
+  "ingress_4xx_rate_pct": "0.25",
+  "ingress_5xx_rate_pct": "0.02",
+  "upstream_latency_seconds": "3.0",
+
+  "external_dep_latency_seconds": "5.0",
+  "external_dep_error_rate_pct": "0.10",
+
+  "secret_refresh_interval_seconds": "3600",
+  "secret_expiry_warning_days": "30",
+
+  "objstore_error_rate_pct": "0.05",
+  "objstore_capacity_pct": "0.85",
+
+  "backup_interval_seconds": "86400",
+  "backup_age_multiplier": "2",
+  "restore_verify_max_age_days": "30",
+
+  "synthetic_journey_failures": "2"
+}

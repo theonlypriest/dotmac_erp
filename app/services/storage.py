@@ -26,6 +26,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_MISSING_OBJECT_CODES = frozenset({"NoSuchKey", "NoSuchObject", "NotFound"})
+
+
+def _is_missing_object_error(exc: Exception) -> bool:
+    """Return whether an object-store error is an authoritative absence."""
+    return getattr(exc, "code", None) in _MISSING_OBJECT_CODES
+
+
 # ---------------------------------------------------------------------------
 # Module-level singleton
 # ---------------------------------------------------------------------------
@@ -199,10 +207,11 @@ class S3StorageService:
         """Check whether an object exists."""
         try:
             self._client.stat_object(self._bucket, key)
-            return True
-        except self._s3_error:
-            # minio raises S3Error with code NoSuchKey for missing objects
-            return False
+        except self._s3_error as exc:
+            if _is_missing_object_error(exc):
+                return False
+            raise
+        return True
 
     @property
     def _s3_error(self) -> type[Exception]:
@@ -274,11 +283,7 @@ class DotmacFilesS3Provider:
 
     @staticmethod
     def _is_missing(exc: Exception) -> bool:
-        return getattr(exc, "code", None) in {
-            "NoSuchKey",
-            "NoSuchObject",
-            "NotFound",
-        }
+        return _is_missing_object_error(exc)
 
     def put(
         self,

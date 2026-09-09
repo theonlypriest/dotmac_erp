@@ -65,7 +65,7 @@ class Settings:
     branding_url_prefix: str = os.getenv("BRANDING_URL_PREFIX", "/static/branding")
 
     # Branding
-    app_version: str = os.getenv("APP_VERSION", "1.33.2")
+    app_version: str = os.getenv("APP_VERSION", "1.33.4")
     brand_name: str = os.getenv("BRAND_NAME", "Dotmac ERP")
     brand_tagline: str = os.getenv(
         "BRAND_TAGLINE",
@@ -212,7 +212,8 @@ class Settings:
         "DOTMAC_ACADEMY_ISSUING_AUTHORITY", "Dotmac Academy"
     )
     # Staff sync (ERP -> dotmac_sub staff accounts). Disabled unless enabled
-    # explicitly; the API key must carry rbac:assign + rbac:roles:read.
+    # explicitly; the API key must carry rbac:assign, rbac:roles:read, and
+    # operations:service_team:membership.
     dotmac_sub_staff_sync_enabled: bool = (
         os.getenv("DOTMAC_SUB_STAFF_SYNC_ENABLED", "false").lower() == "true"
     )

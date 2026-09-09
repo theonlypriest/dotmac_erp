@@ -22,7 +22,6 @@ from app.models.people.hr import (
     Department,
     Designation,
     Employee,
-    EmploymentType,
     Position,
     PositionAssignment,
     PositionAssignmentType,
@@ -40,16 +39,11 @@ from app.schemas.sync.backoffice_people import (
     PositionAssignmentProjection,
     PositionProjection,
 )
+from app.services.people.hr.employment_types import EmploymentTypeService
 
 _Row = TypeVar("_Row")
 _ProjectionSource = (
-    Person
-    | Department
-    | Designation
-    | EmploymentType
-    | Employee
-    | Position
-    | PositionAssignment
+    Person | Department | Designation | Employee | Position | PositionAssignment
 )
 
 
@@ -64,6 +58,7 @@ def _json_default(value: object) -> str:
 
 
 def _fingerprint(payload: dict[str, object]) -> str:
+    """Return the v1 projection fingerprint for one exact wire payload."""
     encoded = json.dumps(
         payload,
         default=_json_default,
@@ -236,16 +231,19 @@ class BackofficePeopleProjectionService:
     def _employment_types(
         self, organization_id: UUID, after: UUID | None, limit: int
     ) -> PeopleProjectionPage:
-        statement = select(EmploymentType).where(
-            EmploymentType.organization_id == organization_id
+        complete = EmploymentTypeService(self.db, organization_id).iter_all()
+        ordered = sorted(
+            (
+                row
+                for row in complete
+                if after is None or row.employment_type_id > after
+            ),
+            key=lambda row: row.employment_type_id,
         )
-        if after is not None:
-            statement = statement.where(EmploymentType.employment_type_id > after)
-        rows, has_more = self._page_rows(
-            statement.order_by(EmploymentType.employment_type_id), limit=limit
-        )
+        rows = ordered[: limit + 1]
+        has_more = len(rows) > limit
         items: list[PeopleProjectionRecord] = []
-        for row in rows:
+        for row in rows[:limit]:
             payload: dict[str, object] = {
                 "code": row.type_code,
                 "name": row.type_name,
@@ -256,7 +254,7 @@ class BackofficePeopleProjectionService:
                 EmploymentTypeProjection(
                     source_id=row.employment_type_id,
                     source_fingerprint=_fingerprint(payload),
-                    source_updated_at=_updated_at(row),
+                    source_updated_at=row.updated_at or row.created_at,
                     code=row.type_code,
                     name=row.type_name,
                     description=row.description,
@@ -435,4 +433,7 @@ class BackofficePeopleProjectionService:
         )
 
 
-__all__ = ["BackofficePeopleProjectionService", "PeopleProjectionEntity"]
+__all__ = [
+    "BackofficePeopleProjectionService",
+    "PeopleProjectionEntity",
+]

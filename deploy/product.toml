@@ -1,0 +1,740 @@
+# DotMac ERP — ProductDeploymentSpec.v1
+#
+# ERP is the first FULL adopter of the deployment foundation (ADR-0070 in
+# dotmac_starter_mt, "Deployment is a stateless versioned foundation, not a
+# module") because it carries the most defects of any of the four Dotmac
+# repositories that were inventoried (dotmac_starter_mt:
+# docs/inventories/deployment-foundation-sources.md § 5-6).
+#
+# This descriptor is an ADAPTER, not a cutover. The exact-pinned published
+# foundation renders the committed assets under `deploy/rendered`, but
+# `scripts/deploy.sh`, `docker-compose.yml`, `Dockerfile` and the backup scripts
+# remain the live deployment path. See deploy/README.md for the remaining
+# parity, observability and host-engine gates.
+#
+# Every non-obvious value below is grounded in a real ERP source location; the
+# citation is in the comment immediately above the value. Where no such
+# evidence exists in this repository, the comment says so explicitly rather
+# than presenting an invented default as fact (this is itself a documented
+# Gap in the inventory: "No product declares a container stop budget" etc.,
+# dotmac_starter_mt:docs/inventories/deployment-foundation-sources.md § 7).
+
+schema = "ProductDeploymentSpec.v1"
+product = "dotmac-erp"
+# ERP runs a LIVE PRODUCTION deployment at https://erp.dotmac.io. This said
+# "reference" while that was true, which is the same class of defect as a
+# production descriptor carrying a placeholder digest: the document was
+# accurate about its own bytes and wrong about the world. `environment` is
+# projected into telemetry identity (deploy/rendered/otel-collector.yaml's
+# `deployment.environment` resource attribute), so the mislabel also meant
+# every span and metric this descriptor governs would have been attributed to
+# a reference environment.
+environment = "production"
+
+[assembly]
+# Generated from ERP_PRODUCT_ASSEMBLY and checked byte-for-byte in CI. Product
+# identity, module versions and persistence-plane selections are one release
+# fact; the digest below is the SHA-256 of the committed canonical bytes.
+manifest_path = "deploy/product-manifest.json"
+manifest_digest = "sha256:9c3547745e453ffbd9339ce0d662af64a5071067087f16008f4630aae8b469b9"
+
+[image]
+# A digest, never a tag — and as of this change that is true of the LIVE
+# deploy path too, not just of this descriptor. `docker-compose.yml` used to
+# read `ghcr.io/michaelayoade/dotmac_erp:${ERP_IMAGE_TAG:-latest}` and
+# `scripts/deploy.sh` pinned that variable to a mutable `sha-<short>` tag, so
+# production consumed a TAG while its own pipeline was resolving, verifying
+# and recording this digest. `ERP_IMAGE_TAG` is retired: compose now reads
+# `${APP_IMAGE:?...}` and deploy.sh resolves APP_IMAGE from
+# `deploy/rendered/docker-compose.yml` — rendered from the reference below —
+# refusing anything that is not `sha256:<64 hex>`.
+#
+# BOUND, no longer the all-zero sentinel. This is the digest protected-main CI
+# resolved for the image it actually built and tested from the revision below —
+# the `Publish Docker Image` job's "Resolve the registry digest of the tested
+# image" step, whose `org.opencontainers.image.revision` annotation equals
+# `source_revision`. Deliberately NOT a resolution of `:latest` or of a
+# `sha-<short>` tag: those are mutable references, which is the exact shape the
+# first line refuses.
+reference = "ghcr.io/michaelayoade/dotmac_erp@sha256:0d29ae34f99fbb9a97c0225666feca2428b8d1aa5b66a4d1a2dc642e486586b3"
+# The exact protected-main revision the bound image was built from. Changing
+# either this or the digest without the other breaks the pairing that makes the
+# image identifiable, so they move together or not at all.
+source_revision = "6140ed40949449e5d6d42e5737aaded909f25fd3"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Runtime materials — the exact env var NAMES ERP's app/worker/beat services
+# read today (docker-compose.yml:9-30, :91-107, :123-139, :157-173). Every
+# name here is credential- or address-shaped (ADR-0009 + spec.py's own "a
+# database address is a material the deployment host resolves"). Deliberately
+# EXCLUDES `MIGRATION_DATABASE_URL` — see [migration].owner_material and the
+# credential-separation rule this whole descriptor exists to make checkable
+# (D3: dotmac_erp:.env.example:13-17 defaults the runtime DSN to the Postgres
+# superuser; this table structurally cannot repeat that mistake because a
+# role naming the owner material is a parse-time refusal, not a review note).
+# ─────────────────────────────────────────────────────────────────────────
+[runtime_materials]
+names = [
+    "DATABASE_URL",
+    "REDIS_PASSWORD",
+    # The three the rendered file was missing entirely, which is why ERP's
+    # workers had no broker to connect to (docker-compose.yml:110-112). They are
+    # MATERIALS and not literal environment because each embeds
+    # ${REDIS_PASSWORD} — a literal would put the credential in this file.
+    "REDIS_URL",
+    "CELERY_BROKER_URL",
+    "CELERY_RESULT_BACKEND",
+    "S3_ENDPOINT_URL",
+    "S3_ACCESS_KEY",
+    "S3_SECRET_KEY",
+    "OPENBAO_ADDR",
+    "OPENBAO_TOKEN",
+    "METRICS_TOKEN",
+]
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Roles — app, worker, beat. NOT `app-dev` (docker-compose.yml's `app-dev`
+# service is a `profiles: [dev]` local-only convenience that bind-mounts the
+# whole repo and runs bare uvicorn — a development topology, not a product
+# process role) and NOT redis/promtail/vmagent (docker-compose.yml's `redis`,
+# `promtail`, `vmagent` services are infrastructure/observability agents this
+# product depends on or ships alongside, not application process roles this
+# product OWNS — they belong in [external_dependencies] / [telemetry], not
+# [[roles]]).
+# ═══════════════════════════════════════════════════════════════════════════
+
+[[roles]]
+code = "app"
+# The REAL effective invocation, and it must be one the IMAGE can actually
+# exec — the rendered Compose file is now the production deploy path's image
+# authority (scripts/deploy.sh), so a command naming a file the image does not
+# hold is not a paraphrase problem, it is a container that cannot start.
+#
+# RESOLVED, and the resolution is a deletion. Every role here used to be
+# prefixed with `/app/entrypoint-monitoring.sh` — a boot-time
+# `pip install python-logging-loki sentry-sdk[fastapi]` wrapper (inventory D6)
+# that this descriptor recorded as a KNOWN TENSION against `read_only_root`.
+# That wrapper is GONE: `scripts/entrypoint-monitoring.sh` was deleted with the
+# audited runtime image (26753cde, "build an audited ERP runtime image"), the
+# Dockerfile's runtime stage COPYs `scripts/` as a three-file allowlist that
+# never included it, and `tests/architecture/test_runtime_image_hardening.py`
+# ::test_boot_time_installer_is_retired_from_all_compose_roles asserts both
+# `not ENTRYPOINT.exists()` and its absence from the root compose.
+#
+# The descriptor and `deploy/rendered/` escaped that assertion, because it was
+# scoped to `docker-compose.yml` alone — an unmonitored region, not an exempt
+# one (ADR-0018). So all three roles kept naming a file that no longer exists
+# anywhere, and the rendered project would have failed to exec on the first
+# container start. That guard is extended to this file and to deploy/rendered
+# in the same change that fixes the rows.
+#
+# What remains is the Dockerfile's real `CMD`, which is the whole invocation:
+#   Dockerfile:121  CMD ["gunicorn", "-c", "gunicorn.conf.py", "app.main:app"]
+# Removing the wrapper also removes the tension with `read_only_root = true`
+# and with the fixed non-root UID below: nothing writes site-packages at boot
+# any more, because nothing installs at boot any more.
+command = [
+    "gunicorn",
+    "-c",
+    "gunicorn.conf.py",
+    "app.main:app",
+]
+replicas = 1
+# Gunicorn's own `graceful_timeout = 30` (gunicorn.conf.py:44) is the budget
+# the app process itself already honors for in-flight requests; 35s gives a
+# small margin over that rather than inventing an unrelated number.
+stop_grace_seconds = 35
+materials = [
+    "DATABASE_URL",
+    "REDIS_PASSWORD",
+    "REDIS_URL",
+    "CELERY_BROKER_URL",
+    "CELERY_RESULT_BACKEND",
+    "S3_ENDPOINT_URL",
+    "S3_ACCESS_KEY",
+    "S3_SECRET_KEY",
+    "OPENBAO_ADDR",
+    "OPENBAO_TOKEN",
+    # app (not worker/beat) serves /metrics behind a token
+    # (app/main.py:1102, token_env_keys=("METRICS_TOKEN",)).
+    "METRICS_TOKEN",
+]
+
+[roles.environment]
+# Literal, non-secret configuration the rendered file was missing entirely.
+# Deliberately NOT `OPENBAO_ALLOW_INSECURE` or `CSP_ALLOW_UNSAFE`, which
+# docker-compose.yml:22,25,80-81 hardcodes to 'true' in the PRODUCTION service
+# blocks (inventory defect D4). The code defaults are safe; baking the insecure
+# value is what made them unsafe, and this descriptor does not carry it forward.
+PYTHONUNBUFFERED = "1"
+S3_BUCKET_NAME = "dotmac-erp"
+BANKING_AUTO_MATCH_ENABLED = "false"
+
+[roles.resources]
+# NOT sourced from ERP: docker-compose.yml declares no `deploy.resources`
+# block for any service (repo-wide grep confirms zero `mem_limit`/`cpus`/
+# `deploy:` keys). This is the same "no product declares resource limits"
+# shape as the container-stop-budget Gap in the inventory (§ 7). Values below
+# are a conservative placeholder sized for GUNICORN_WORKERS=4
+# (docker-compose.yml:30) plus WeasyPrint/Cairo PDF rendering (Dockerfile's
+# libcairo2/libpango1.0-0 install) and need confirmation from whoever owns
+# ERP's production host sizing before this is trusted as a real ceiling.
+cpus = "2.0"
+memory = "2g"
+pids = 512
+
+[roles.security]
+# Hardened defaults (read_only_root, no_new_privileges, cap_drop=ALL,
+# user=10001:10001) are left at the foundation's defaults deliberately — see
+# the KNOWN TENSION comment on `command` above for why `read_only_root = true`
+# is not yet actually true of the running container today.
+
+[roles.health.live]
+# Liveness never touches a dependency (app/main.py:960 `liveness_probe`
+# returns a hardcoded {"status": "alive"} unconditionally) — this is the
+# correct half of ERP's existing health surface; it is `/health` (D2) that is
+# the defect, not `/health/live`.
+path = "/health/live"
+port = 8002
+interval_seconds = 10
+timeout_seconds = 3
+retries = 3
+# 30s covers Gunicorn's own boot: four workers importing the application and
+# opening their first pool connections. It no longer has to cover a boot-time
+# `pip install` — that wrapper is retired; see the `command` row above.
+start_period_seconds = 30
+
+[roles.health.ready]
+# THE CENTRAL FIX this descriptor exists to make checkable: ERP's Compose
+# healthcheck (docker-compose.yml:43-48) and scripts/deploy.sh's health gate
+# (scripts/deploy.sh:31 `HEALTH_URL="http://localhost:8003/health"`) both
+# point at plain `/health` (app/main.py:914-916), which is hardcoded to
+# `return {"status": "ok"}` — it can NEVER fail, so it has never actually
+# gated anything. The real dependency-aware check already exists and is
+# unused by either gate: `readiness_probe()` at app/main.py:969-980+ checks
+# `_check_database()` and `_check_redis()` (plus `collect_dependency_health()`
+# for storage/openbao) and returns 503 when a required dependency is down.
+# Declaring live and ready as two DIFFERENT paths — enforced by spec.py's own
+# parse-time refusal when they match — is what makes "the deploy gate can
+# never fail" impossible to reintroduce silently.
+path = "/health/ready"
+port = 8002
+interval_seconds = 5
+timeout_seconds = 3
+retries = 6
+start_period_seconds = 30
+
+[[roles]]
+code = "worker"
+# Waits on the managed Redis, and on `service_healthy` rather than the real
+# file's `service_started` — which is satisfied the instant the container
+# exists, before Redis has loaded its dump.
+depends_on = ["redis"]
+# No `/app/entrypoint-monitoring.sh` prefix — see the `app` role above for
+# why the retired boot-time installer had to leave every role at once.
+command = [
+    "celery",
+    "-A",
+    "app.celery_app",
+    "worker",
+    "-l",
+    "info",
+]
+replicas = 1
+stop_grace_seconds = 120
+materials = [
+    "DATABASE_URL",
+    "REDIS_PASSWORD",
+    "REDIS_URL",
+    "CELERY_BROKER_URL",
+    "CELERY_RESULT_BACKEND",
+    "S3_ENDPOINT_URL",
+    "S3_ACCESS_KEY",
+    "S3_SECRET_KEY",
+    "OPENBAO_ADDR",
+    "OPENBAO_TOKEN",
+]
+
+[roles.environment]
+# Literal, non-secret configuration the rendered file was missing entirely.
+# Deliberately NOT `OPENBAO_ALLOW_INSECURE` or `CSP_ALLOW_UNSAFE`, which
+# docker-compose.yml:22,25,80-81 hardcodes to 'true' in the PRODUCTION service
+# blocks (inventory defect D4). The code defaults are safe; baking the insecure
+# value is what made them unsafe, and this descriptor does not carry it forward.
+PYTHONUNBUFFERED = "1"
+S3_BUCKET_NAME = "dotmac-erp"
+BANKING_AUTO_MATCH_ENABLED = "false"
+
+[roles.resources]
+# Same "not sourced from ERP" caveat as the app role above — no resource
+# limits exist in docker-compose.yml for the worker service either.
+cpus = "1.0"
+memory = "1g"
+pids = 512
+
+[roles.worker]
+kind = "celery"
+# Mirrors the real Celery app reference the worker command itself uses
+# (docker-compose.yml's `-A app.celery_app`, same as the command above).
+ping_command = ["celery", "-A", "app.celery_app", "inspect", "ping"]
+
+# NO [roles.health.live] here, and that is now correct rather than a gap.
+# ERP's worker container runs no HTTP server at all (repo-wide grep of
+# app/celery_app.py and app/tasks/ finds no http.server/Flask/uvicorn binding
+# in the Celery process), and the only real liveness signal it has is the
+# `ping_command` above. An earlier draft of this file satisfied a schema rule
+# by declaring a probe on port 9100 that nothing listens on — which renders
+# into a healthcheck that can never pass, giving the role a permanently
+# failing gate instead of no gate.
+#
+# The schema was corrected rather than the descriptor: a running role must
+# declare SOME liveness signal, and an HTTP probe, a worker ping and a
+# scheduler tick budget are three shapes of one thing. A role with none of the
+# three is refused, because that role is unmonitored rather than exempt.
+
+[[roles]]
+code = "beat"
+depends_on = ["redis"]
+# No `/app/entrypoint-monitoring.sh` prefix — see the `app` role above for
+# why the retired boot-time installer had to leave every role at once.
+command = [
+    "celery",
+    "-A",
+    "app.celery_app",
+    "beat",
+    "-l",
+    "info",
+]
+replicas = 1
+stop_grace_seconds = 30
+materials = [
+    "DATABASE_URL",
+    "REDIS_PASSWORD",
+    "REDIS_URL",
+    "CELERY_BROKER_URL",
+    "CELERY_RESULT_BACKEND",
+    "S3_ENDPOINT_URL",
+    "S3_ACCESS_KEY",
+    "S3_SECRET_KEY",
+    "OPENBAO_ADDR",
+    "OPENBAO_TOKEN",
+]
+
+[roles.environment]
+# Literal, non-secret configuration the rendered file was missing entirely.
+# Deliberately NOT `OPENBAO_ALLOW_INSECURE` or `CSP_ALLOW_UNSAFE`, which
+# docker-compose.yml:22,25,80-81 hardcodes to 'true' in the PRODUCTION service
+# blocks (inventory defect D4). The code defaults are safe; baking the insecure
+# value is what made them unsafe, and this descriptor does not carry it forward.
+PYTHONUNBUFFERED = "1"
+S3_BUCKET_NAME = "dotmac-erp"
+BANKING_AUTO_MATCH_ENABLED = "false"
+
+[roles.resources]
+cpus = "0.5"
+memory = "512m"
+pids = 256
+
+[roles.scheduler]
+# NOT sourced from ERP: nothing in this repository records or exposes when
+# Beat last ticked (no heartbeat file, no metric). This is the SAME defect
+# class ADR-0070's own context section names by name: "a stale Beat container
+# survived a rollout and scheduled failing tasks for hours while every
+# container-level check was green" (dotmac_sub incident, cited in
+# dotmac_starter_mt:docs/adr/0065-...md). 120s is a placeholder tick budget,
+# not derived from any ERP schedule config; making it real requires Beat to
+# actually publish a tick timestamp somewhere a probe can read.
+last_tick_max_age_seconds = 120
+# HOW to read the last tick, declared rather than guessed. **And a recorded
+# gap**: this reads the schedule FILE's mtime, which Beat touches whether or not
+# the tasks it scheduled succeeded — so a Beat that is running and failing
+# everything still looks fresh. It is the only signal ERP has today. Closing
+# this properly needs Beat to publish a real last-successful-tick timestamp;
+# until it does, this budget detects a DEAD scheduler and not a broken one, and
+# the descriptor should not pretend otherwise.
+tick_command = ["sh", "-c", "stat -c %%Y /tmp/celerybeat-schedule"]
+
+# NO [roles.health.live] here either. Beat runs no HTTP server, and there is
+# no `ping_command` equivalent for it — it drains no queue, so `celery inspect
+# ping` says nothing about whether it is actually scheduling. Its liveness
+# signal is the tick budget above, which is the RIGHT signal and also the one
+# ERP cannot currently produce: nothing in this repository records or exposes
+# when Beat last ticked. That gap is real and stays reported.
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Migration
+# ═══════════════════════════════════════════════════════════════════════════
+
+[migration]
+# scripts/deploy.sh's real migration step (Step 3b, "Applying migrations
+# (alembic upgrade heads)") — plural, because ERP has hit multi-head states
+# before and structurally always will: see the expected_heads comment below.
+#
+# The builder-stage runner prefix these three rows used to carry was REMOVED
+# when the runtime image became a hardened, toolchain-free stage with a
+# file-by-file `scripts/` allowlist. The comments that used to defend the
+# prefix as "load-bearing, not decorative" cited a deploy.sh line that no
+# longer spells it that way, so they were defending a spelling nothing ran.
+# `test_the_descriptor_command_arrays_name_no_builder_only_tooling` now makes
+# that class of drift fail instead of accumulating.
+command = ["alembic", "upgrade", "heads"]
+# The read counterpart. It has no scripts/deploy.sh line to match — nothing in
+# the deploy path reads current heads — so it is checked only for tooling
+# reachability, not argv equality. Saying so is the point: an unmatched row is
+# unmonitored, not verified.
+heads_command = ["alembic", "current"]
+owner_material = "MIGRATION_DATABASE_URL"
+
+# `alembic heads` against the exact locked environment must equal
+# these seven heads: ERP's lineage plus Files, Accounting, Imports, Numbering,
+# Tax, and People. The architecture gate queries Alembic's composed graph
+# directly; this is not a source-text approximation.
+expected_heads = [
+    "20260902_staff_access_projection",
+    "fi_0001_stored_files",
+    "im_0001_import_runs",
+    "ac_0001_accounting",
+    "nu_0001_numbering",
+    "tx_0003_result_fingerprint",
+    "pe_0001_people_directory",
+]
+# `20260828_people_et_activation` changes the writer/authority boundary. The
+# previous image contains legacy writers and is therefore neither allowed to
+# serve during DDL nor a valid rollback target afterward. The only supported
+# activation path is `scripts/deploy.sh --people-employment-type-activation`,
+# which drains app/worker/beat before migration and becomes forward-fix-only as
+# soon as the migration commits. This safe-direction declaration also makes the
+# shared Foundation plan refuse a warm/rollback path while it remains shadowed.
+compatibility = "maintenance_required"
+# NOT sourced from ERP: scripts/deploy.sh's migration step is a bare
+# `alembic upgrade heads` with no lock/retry loop at all (unlike dotmac_sub's
+# `MIGRATION_MAX_ATTEMPTS`/`MIGRATION_RETRY_SECONDS`, inventory § 3 row 18).
+# Left at the foundation's defaults.
+lock_timeout_seconds = 300
+lock_retries = 3
+# scripts/deploy.sh Step 3a, run verbatim inside the migration container
+# before any DDL: `python scripts/bootstrap_database_roles.py --verify-only`
+# (scripts/deploy.sh's preflight block, "Preflight: migration executor
+# contract..."). Verify-only, never elevates — see
+# scripts/bootstrap_database_roles.py's own module docstring.
+#
+# NOT `poetry run`, and no entrypoint override. The runtime image carries no
+# builder toolchain and its `scripts/` directory is a COPY allowlist, so the
+# only invocable form is the interpreter plus a script the image actually
+# holds. This row drifted once — it kept the retired `poetry run` spelling
+# after the image stopped containing Poetry — which is why
+# `test_the_descriptor_preflight_matches_the_deploy_path` now compares this
+# argv against the one `scripts/deploy.sh` really executes.
+preflight_command = ["python", "scripts/bootstrap_database_roles.py", "--verify-only"]
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Ingress
+# ═══════════════════════════════════════════════════════════════════════════
+
+[ingress]
+# Real, committed host: docker-compose.yml:12,72 set `APP_URL:
+# https://erp.dotmac.io` for both the production `app` and dev `app-dev`
+# services, and docs/oidc_identity_contract.md:10 and
+# docs/adr/0004-the-erp-bill-of-materials-is-frozen.md:16 both independently
+# refer to `erp.dotmac.io` as the live production host. ERP itself has NO
+# nginx/ingress configuration file in this repository (confirmed by the
+# inventory § 2 and by a repo-wide search here) — this section is therefore
+# the first typed statement of ERP's ingress identity, not a transcription of
+# an existing config.
+host = "erp.dotmac.io"
+# TRUSTED_PROXY_IPS is real (docker-compose.yml:17,
+# `172.16.0.0/12,127.0.0.1`), consumed by app/net.py:27.
+trusted_proxies = ["172.16.0.0/12", "127.0.0.1"]
+
+[[ingress.routes]]
+path = "/"
+role = "app"
+port = 8002
+# No SSE routes: every `StreamingResponse` use found in app/web/**
+# (app/web/finance/reports.py and similar) is a file DOWNLOAD (CSV/PDF/XLSX
+# export with a Content-Disposition header), not `text/event-stream`. No
+# websocket routes found either.
+websocket = false
+sse = false
+# max_body_bytes / read_timeout_seconds / send_timeout_seconds left at
+# defaults: ERP has no nginx config in this repository to source a real value
+# from (see the Gap noted above the [ingress] table).
+
+[ingress.static]
+# ERP's Dockerfile DOES bake compiled CSS into the image (css-builder stage ->
+# `./static/css/app.css`, Dockerfile), which is what `static = "image"`
+# describes. What it does NOT yet describe is that
+# docker-compose.yml:36-38 OVERRIDES this at runtime with host bind mounts of
+# `./static`, `./templates` and `./gunicorn.conf.py` straight from the repo
+# working tree (inventory D1) — `static = "volume"` is refused at parse time
+# by this schema specifically to prevent expressing that shape, so `"image"`
+# is declared here as the CORRECTED TARGET the eventual renderer emits, not
+# as a claim that today's docker-compose.yml already matches it.
+static = "image"
+# As of 2026-08-30 this is TRUE, not aspirational. The compose bind mounts of
+# ./static, ./templates, ./license and ./gunicorn.conf.py are removed, and
+# scripts/sync-static.sh -- which rsynced the checkout into the nginx web root
+# that nginx serves AHEAD of the application -- is retired. nginx proxies
+# /static/ to the app, which serves it from the image.
+#
+# The expected digest of that served tree is recorded in
+# deploy/static-tree-digest.json, NOT here: ProductDeploymentSpec.v1 as
+# implemented by the pinned dotmac-deployment-foundation==0.2.0a2 has no field
+# for a served-asset digest and refuses unknown keys at parse time (the same
+# strictness that refuses static = "volume"). A first-class field belongs in the
+# shared facility; when it exists, that file collapses into this descriptor.
+# CI compares the recorded digest against what the running container actually
+# serves over HTTP -- an internal check of the image would have passed
+# throughout the period a stale stylesheet was being served.
+# User-uploaded files (avatars, attachments, ...) go through
+# app/services/file_upload.py to S3 (S3_BUCKET_NAME etc.), never a local
+# volume, so "none" (the product serves them itself, out of an external
+# object store) is accurate today, not aspirational.
+uploads = "none"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Backup
+# ═══════════════════════════════════════════════════════════════════════════
+
+[backup]
+[[backup.datasets]]
+code = "primary"
+kind = "postgres"
+material = "BACKUP_DATABASE_URL"
+# scripts/backup_erp_db.sh:20 `KEEP_LAST="${KEEP_LAST:-5}"` is a COUNT of
+# retained remote backups, not a day count — this field is inherently in
+# days. 5 is carried over assuming the (unverified — no cron/systemd timer is
+# committed to this repository) backup cadence is daily; if it runs more or
+# less often than daily this number is wrong and needs an operator to correct
+# it against the real schedule.
+retention_days = 5
+checksum = "sha256"
+encryption = "none"
+restore_proof_max_age_days = 30
+# `verify` is the FOUNDATION's requirement, explicitly NOT what ERP's backup
+# does today: scripts/backup_erp_db.sh performs a `pg_dump | gzip -9` and an
+# `rclone copy` with NO verification step at all (not even the size-only
+# check dotmac_sub's equivalent script has — inventory D8). Nothing in this
+# repository has ever proven one of these backups restores
+# (inventory § 7 Gap: "No product has a restore rehearsal" —
+# scripts/restore_from_backup.py exists but nothing schedules or records a
+# rehearsal run of it).
+verify = ["schema", "row_counts", "migration_heads"]
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Telemetry
+# ═══════════════════════════════════════════════════════════════════════════
+
+[telemetry]
+logs = true
+metrics = true
+traces = false
+metrics_material = "METRICS_TOKEN"
+app_direct_shipping = false
+# CORRECTION to the task's own working assumption: ERP's promtail does NOT
+# "exclude the app." config/promtail/promtail-config.yml's generic `docker`
+# job drops `app|worker|beat|app-dev` (config/promtail/promtail-config.yml,
+# relabel_configs `action: drop`) specifically BECAUSE there are DEDICATED
+# `app` and `celery` jobs a few lines below that scrape those exact
+# containers' stdout via the Docker socket with their own pipeline stages —
+# i.e. promtail (a collector tailing container logs) IS the app's log path,
+# not an exclusion of it.
+#
+# The real reason `app_direct_shipping = false` is correct: app/monitoring.py
+# ships its OWN separate direct-to-Loki path (`ResilientLokiHandler`,
+# app/monitoring.py:5,116+), gated on the `LOKI_URL` env var
+# (app/monitoring.py:355-356, falls back to `os.getenv("LOKI_URL", "")`).
+# .env.example:186 ships `LOKI_URL=` (empty) by default, so that direct-
+# shipping handler self-disables by default and the collector (promtail) path
+# above is the sole active one — matching `app_direct_shipping = false` +
+# `logs = true`. If an operator ever sets `LOKI_URL` on a host that ALSO runs
+# this compose file's promtail (`COMPOSE_PROFILES=observability`), every log
+# line would ship twice; .env.example:198-227 documents this exact danger at
+# length (a pre-existing EXTERNAL promtail on erp.dotmac.io already causes an
+# unattributed-duplicate risk today, independent of this descriptor).
+deployment_annotations = true
+# config/vmagent/config.yml:12 `scrape_interval: 60s` — real, not the
+# facility's 30s default.
+scrape_interval_seconds = 60
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Egress — real, committed outbound hosts only (never invented)
+# ═══════════════════════════════════════════════════════════════════════════
+
+[egress]
+hosts = [
+    # .env.example:212 LOKI_PUSH_URL and :218 VM_REMOTE_WRITE_URL both target
+    # this same central Observability host (verified 2026-07-28 per
+    # .env.example:210).
+    "75.119.128.247",
+    # .env.example:253 WEBHOOK_ALLOWED_HOSTS — the platform ceiling for
+    # outbound webhooks to DotMac Sub.
+    "selfcare.dotmac.io",
+    # app/services/remita/client.py:23 REMITA_LIVE_URL.
+    "login.remita.net",
+    # app/services/finance/payments/paystack_client.py:21 PAYSTACK_BASE_URL.
+    "api.paystack.co",
+]
+
+# ═══════════════════════════════════════════════════════════════════════════
+# External dependencies — only things a required phase genuinely cannot
+# proceed without, per app/dependency_health.py's OWN required-set
+# (DEFAULT_REQUIRED_DEPENDENCIES = {"storage", "openbao"}) plus the two
+# checked unconditionally in readiness_probe() (`_check_database()`,
+# `_check_redis()`). Optional integrations the app degrades gracefully
+# without (SMTP, CRM, Paystack, Nextcloud, dotmac_sub, Remita — all present in
+# app/dependency_health.py's `checks` dict but NOT in
+# DEFAULT_REQUIRED_DEPENDENCIES) are deliberately NOT listed here: this
+# section is "cannot serve without," not "every integration ERP has."
+# ═══════════════════════════════════════════════════════════════════════════
+
+[[external_dependencies]]
+code = "postgres"
+kind = "postgres"
+required_for = ["ready", "migrate", "backup"]
+material = "DATABASE_URL"
+
+[[external_dependencies]]
+code = "redis"
+kind = "redis"
+# app/main.py's readiness_probe() checks `_check_redis()` unconditionally
+# (checks dict, not the optional DEFAULT_REQUIRED_DEPENDENCIES set — it is
+# core, like database).
+required_for = ["boot", "ready"]
+material = "REDIS_PASSWORD"
+
+# MANAGED: this deployment runs it (docker-compose.yml:166-176), so it is
+# rendered as a service. An earlier revision declared it as an ordinary external
+# dependency, and the rendered Compose file therefore contained Celery broker
+# configuration and no Redis — internally consistent and non-functional.
+image = "redis:7"
+command = ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
+materials = ["REDIS_PASSWORD"]
+# `redis-cli ping` and not a TCP check: this instance requires a password, so a
+# probe that only opens the socket would report ready while every real command
+# was being refused. `-a` reads the same material.
+health_probe = ["redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+memory = "512m"
+cpus = "0.5"
+
+[[external_dependencies.ports]]
+# 127.0.0.1:6382 in the real file — loopback, and a non-default host port so it
+# cannot collide with another product's Redis on a shared host.
+container = 6379
+host = 6382
+
+[[external_dependencies]]
+code = "object_store"
+kind = "object_store"
+# "storage" is in app/dependency_health.py's DEFAULT_REQUIRED_DEPENDENCIES.
+required_for = ["ready"]
+material = "S3_ENDPOINT_URL"
+
+[[external_dependencies]]
+code = "openbao"
+# No dedicated ExternalDependency.KINDS value exists for a secrets store;
+# OpenBao is reached over its HTTP API, so "http_api" is the closest fit —
+# see the report for this being noted as an imperfect categorical fit, not a
+# blocking gap.
+kind = "http_api"
+# "openbao" is the other entry in DEFAULT_REQUIRED_DEPENDENCIES.
+required_for = ["ready"]
+material = "OPENBAO_ADDR"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Product alerts — ERP finance/job-domain only. Infrastructure alerts
+# (container down, disk, generic HTTP error rate, ...) belong to the
+# foundation's own catalogue, not here.
+#
+# Expressions reference REAL, already-instrumented metrics: `job_runs_total`
+# and `job_duration_seconds`, both labeled `{task, status}`
+# (app/metrics.py:21-31), populated for EVERY Celery task automatically by
+# app/celery_app.py's task signal handlers (`_record_task_metrics`,
+# app/celery_app.py:97, which calls JOB_RUNS.labels(...)/JOB_DURATION.labels(...)
+# at app/metrics.py:108-109) — not invented gauge names. The specific `task`
+# label values below are real Celery task function names found in
+# app/tasks/gl_posting.py, app/tasks/ap_posting.py, app/tasks/payroll.py and
+# app/tasks/imports.py.
+# ═══════════════════════════════════════════════════════════════════════════
+
+[[alerts]]
+code = "GL_UNPOSTED_BATCH_STALLED"
+severity = "ticket"
+# app/tasks/gl_posting.py:56 `post_approved_journal_backlog` is the task that
+# moves JournalEntry rows out of APPROVED into POSTED
+# (app/models/finance/gl/journal_entry.py's JournalStatus — POSTED is the
+# only `gl_impacting()` status). If it stops succeeding, approved journal
+# entries pile up unposted.
+expression = "increase(job_runs_total{task=\"post_approved_journal_backlog\",status=\"success\"}[30m]) == 0"
+owner = "finance-platform-oncall"
+for_seconds = 1800
+summary = "No successful GL journal-backlog posting run in 30 minutes; approved journal entries are not reaching POSTED."
+runbook = "No dedicated runbook exists yet. First checks: `worker` container logs for post_approved_journal_backlog exceptions; Celery queue depth; whether the DB or Redis dependency checks are degraded."
+recovery = "increase(job_runs_total{task=\"post_approved_journal_backlog\",status=\"success\"}[30m]) > 0"
+protects = "Period close and trial-balance accuracy depend on approved journals reaching POSTED without unbounded delay."
+
+[[alerts]]
+code = "AP_PAYMENT_POSTING_STALLED"
+severity = "page"
+# app/tasks/ap_posting.py:35 `post_unposted_ap_invoices`.
+expression = "increase(job_runs_total{task=\"post_unposted_ap_invoices\",status=\"success\"}[30m]) == 0"
+owner = "finance-platform-oncall"
+for_seconds = 1800
+summary = "No successful AP invoice-posting run in 30 minutes; approved supplier invoices/payments are not moving forward."
+runbook = "No dedicated runbook exists yet. First checks: worker logs for post_unposted_ap_invoices exceptions; upstream bank/Paystack integration health via /health/monitoring."
+recovery = "increase(job_runs_total{task=\"post_unposted_ap_invoices\",status=\"success\"}[30m]) > 0"
+protects = "Vendor payment obligations and supplier trust depend on AP postings not silently stalling."
+
+[[alerts]]
+code = "PAYROLL_DRAFT_GENERATION_FAILED"
+severity = "page"
+# app/tasks/payroll.py:361 `auto_generate_draft_payroll`.
+expression = "increase(job_runs_total{task=\"auto_generate_draft_payroll\",status=\"failure\"}[1h]) > 0"
+owner = "people-platform-oncall"
+for_seconds = 3600
+summary = "auto_generate_draft_payroll has failed at least once in the last hour; a payroll run may not have been created on schedule."
+runbook = "No dedicated runbook exists yet. First checks: worker logs for auto_generate_draft_payroll traceback; whether a draft PayrollEntry (PayrollEntryStatus.DRAFT) exists for the expected period."
+recovery = "increase(job_runs_total{task=\"auto_generate_draft_payroll\",status=\"failure\"}[1h]) == 0"
+protects = "Payroll runs on a fixed statutory/pay-period calendar; a missed or failed draft generation directly threatens on-time pay."
+
+[[alerts]]
+code = "IMPORT_BACKLOG_STALLED"
+severity = "ticket"
+# app/tasks/imports.py:26 `process_customer_import_partitions` — the
+# dotmac-imports run-partition worker.
+expression = "increase(job_runs_total{task=\"process_customer_import_partitions\",status=\"failure\"}[1h]) > 3"
+owner = "data-platform-oncall"
+for_seconds = 3600
+summary = "More than 3 failed customer-import partition runs in the last hour; the bulk-import backlog is not draining cleanly."
+runbook = "No dedicated runbook exists yet. First checks: worker logs for process_customer_import_partitions exceptions; the relevant ImportRun's per-row outcome ledger (dotmac-imports)."
+recovery = "increase(job_runs_total{task=\"process_customer_import_partitions\",status=\"failure\"}[1h]) <= 3"
+protects = "Customer bulk-import correctness and the promotion gate that depends on a clean dry-run/apply partition run."
+
+[[alerts]]
+code = "GL_POSTING_LATENCY_HIGH"
+severity = "info"
+expression = "histogram_quantile(0.95, sum(rate(job_duration_seconds_bucket{task=\"post_approved_journal_backlog\"}[10m])) by (le)) > 60"
+owner = "finance-platform-oncall"
+for_seconds = 600
+summary = "p95 GL journal-backlog posting duration exceeds 60s; posting is slow rather than failed outright."
+runbook = "No dedicated runbook exists yet. First checks: DB lock contention on journal_entry/journal_entry_line tables; organization_id cardinality in the current backlog."
+recovery = "histogram_quantile(0.95, sum(rate(job_duration_seconds_bucket{task=\"post_approved_journal_backlog\"}[10m])) by (le)) <= 60"
+protects = "Early warning before GL_UNPOSTED_BATCH_STALLED fires outright; slow posting degrades close-process confidence before it fully stalls."
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Rollout
+# ═══════════════════════════════════════════════════════════════════════════
+
+[rollout]
+# NOT sourced from ERP: no stability-window concept exists in
+# scripts/deploy.sh today (unlike dotmac_sub's BACKGROUND_STABILITY_SECONDS).
+# Left at the foundation's default.
+stability_window_seconds = 120
+# scripts/deploy.sh:237 `DOCKER_IMAGE_KEEP_LAST:-5` (also
+# scripts/prune_docker_images.sh's own default) — real, matches ERP's actual
+# image-retention policy today. Per inventory D18, retention failing is
+# intentionally fail-open in ERP's own script ("WARNING: Docker image
+# retention failed; deploy remains healthy") — this descriptor has no field
+# for that fail-open behavior itself (it is a property of the deployment
+# ENGINE's plan, not the product descriptor), so it is not claimed here.
+rollback_images_retained = 5

@@ -20,6 +20,9 @@ env:
   # produced by 2.2.0; 2.4.1 is the accepted exact generator for its next
   # dependency update, and every CI reader is pinned to it now.
   POETRY_VERSION: "2.4.1"
+  # Exact published facility release. Keep this immutable in Git; a repository
+  # variable would make the accepted image contract mutable outside review.
+  FOUNDATION_IMAGE_AUDIT_VERSION: "0.2.0a2"
   DATABASE_URL: "sqlite:///./test.db"
   SECRET_KEY: "ci-test-secret-key-not-for-production"  # pragma: allowlist secret
   REDIS_URL: "redis://localhost:6379/0"
@@ -129,6 +132,11 @@ jobs:
       - name: Install dependencies
         run: poetry install --no-interaction
 
+      - name: Verify canonical product assembly manifest
+        run: >-
+          poetry run python -m scripts.product_manifest check
+          --path deploy/product-manifest.json
+
       - name: Run tests with coverage
         run: poetry run pytest tests/ --ignore=tests/integration --ignore=tests/e2e --cov=app --cov-report=xml --cov-report=term-missing -q --timeout=60
 
@@ -209,6 +217,25 @@ jobs:
       - name: Scan tracked files for private key material
         run: bash scripts/ci/scan_private_keys.sh
 
+  # GitHub `needs` cannot cross workflow boundaries. Keep the independently
+  # required Engineering standards workflow (and its stable branch-protection
+  # context), while re-running the exact pinned gate here so an image cannot be
+  # published before this revision has passed the accepted governance source.
+  release-engineering-standards:
+    name: Release engineering standards
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the evaluated product revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Enforce the accepted Dotmac engineering standards
+        uses: michaelayoade/dotmac_governance/.github/actions/standards-check@a19259b10568d29dc0a9617347498fea7f1e7a97
+        with:
+          default-branch: ${{ github.event.repository.default_branch }}
+
   # ---------------------------------------------------------------------------
   # Docker Build & Health Check
   # Builds the multi-stage image (Node CSS + Python) and verifies the container
@@ -221,8 +248,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install the declared audit Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Resolve canonical product manifest digest
+        id: product-manifest
+        run: |
+          set -euo pipefail
+          digest="sha256:$(sha256sum deploy/product-manifest.json | cut -d ' ' -f 1)"
+          if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "canonical product manifest digest is malformed" >&2
+            exit 1
+          fi
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+
+      # Labels are image bytes, so they must be present before the image is
+      # tested. The publish job may add registry tags, but it must never rebuild
+      # or otherwise mutate this image after the health and migration gates.
+      - name: Extract immutable image metadata
+        id: tested-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
 
       - name: Build Docker image
         uses: docker/build-push-action@v6
@@ -230,10 +282,50 @@ jobs:
           context: .
           load: true
           tags: dotmac-erp:ci
+          labels: |
+            ${{ steps.tested-meta.outputs.labels }}
+            io.dotmac.product-manifest.digest=${{ steps.product-manifest.outputs.digest }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           secrets: |
             forgejo_token=${{ secrets.FORGEJO_READ_TOKEN }}
+
+      - name: Verify tested image provenance labels
+        env:
+          EXPECTED_MANIFEST_DIGEST: ${{ steps.product-manifest.outputs.digest }}
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' dotmac-erp:ci)" = "${GITHUB_SHA}"
+          test "$(docker image inspect --format '{{index .Config.Labels "io.dotmac.product-manifest.digest"}}' dotmac-erp:ci)" = "${EXPECTED_MANIFEST_DIGEST}"
+
+      - name: Verify runtime filesystem and identity
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Config.User}}' dotmac-erp:ci)" = "10001:10001"
+          test "$(docker image inspect --format '{{range $port, $_ := .Config.ExposedPorts}}{{$port}}{{end}}' dotmac-erp:ci)" = "8002/tcp"
+          docker run --rm \
+            --read-only \
+            --user 10001:10001 \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            --entrypoint sh \
+            dotmac-erp:ci \
+            -ec '
+              test "$(id -u):$(id -g)" = "10001:10001"
+              test ! -e /app/pyproject.toml
+              test ! -e /app/poetry.lock
+              test ! -e /app/tests
+              ! command -v poetry
+              test -r /app/locales/en.json
+              test -r /app/templates/base.html
+              test -r /app/static/css/app.css
+              test -r /app/scripts/bootstrap_database_roles.py
+              test -r /app/scripts/verify_runtime_admission.py
+              python -c "import alembic, celery, logging_loki, sentry_sdk, weasyprint"
+              test -w /tmp
+              test ! -w /app
+            '
 
       - name: Create CI network
         run: docker network create ci-net
@@ -286,6 +378,11 @@ jobs:
           PGPASSWORD: postgres  # pragma: allowlist secret
         run: |
           docker run --rm --name ci-role-bootstrap --network ci-net \
+            --read-only \
+            --user 10001:10001 \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
             -e BOOTSTRAP_DATABASE_URL=postgresql://postgres@ci-db:5432/dotmac_erp_ci \
             -e PGPASSWORD \
             dotmac-erp:ci \
@@ -299,8 +396,14 @@ jobs:
       - name: Run database migrations
         run: |  # pragma: allowlist secret
           docker run --rm --name ci-migrate --network ci-net \
+            --read-only \
+            --user 10001:10001 \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
             -e DATABASE_URL=postgresql+psycopg://postgres:postgres@ci-db:5432/dotmac_erp_ci \
             -e MIGRATION_DATABASE_URL=postgresql+psycopg://app_admin@ci-db:5432/dotmac_erp_ci \
+            -e PEOPLE_EMPLOYMENT_TYPE_ACTIVATION=1 \
             -e SECRET_KEY=ci-test-secret-key-not-for-production \
             -e JWT_SECRET=ci-test-jwt-secret-key-minimum-32-bytes-long \
             -e TOTP_ENCRYPTION_KEY=QLUJktsTSfZEbST4R-37XmQ0tCkiVCBXZN2Zt053w8g= \
@@ -308,9 +411,107 @@ jobs:
             dotmac-erp:ci \
             alembic upgrade heads
 
+      # =====================================================================
+      # Backup and restore rehearsal.
+      #
+      # ERP's backup was `pg_dump` of one database and nothing else: roles,
+      # `app_admin` and every GRANT the RLS policies depend on were in no
+      # backup, and `scripts/restore_from_backup.py` only reloads COPY blocks.
+      # There was no restore procedure at all. Measured in
+      # docs/inventories/2026-08-30-erp-production-infrastructure-preflight.md.
+      #
+      # This rehearses the MECHANISM end to end against the cluster the job has
+      # just migrated -- real ERP schema, real bootstrapped roles -- and
+      # restores into a second, disposable PostgreSQL container. It does NOT
+      # rehearse production bytes; that needs a disposable host with capacity
+      # for the real ~8 GB artifact and clearance to hold production data.
+      # =====================================================================
+
+      - name: Seed a row the restore must carry across
+        run: >-
+          docker exec ci-db psql -X -v ON_ERROR_STOP=1 -U postgres -d dotmac_erp_ci
+          -c "CREATE TABLE restore_rehearsal_canary (id int primary key, note text);
+              INSERT INTO restore_rehearsal_canary VALUES (1, 'survives the restore');
+              GRANT SELECT ON restore_rehearsal_canary TO app_user;"
+
+      - name: Back up the migrated cluster (globals + verified archive)
+        run: |
+          sudo mkdir -p /var/backups/db && sudo chown "$(id -u)" /var/backups/db
+          DB_CONTAINER=ci-db DB_NAME=dotmac_erp_ci DB_USER=postgres \
+          ENV_FILE=/nonexistent SKIP_UPLOAD=1 \
+            bash scripts/backup_erp_db.sh
+
+      - name: Start a disposable restore target
+        run: |  # pragma: allowlist secret
+          docker run -d --name ci-db-restore --network ci-net \
+            -e POSTGRES_USER=postgres \
+            -e POSTGRES_PASSWORD=postgres \
+            -e POSTGRES_HOST_AUTH_METHOD=trust \
+            postgres:16
+          for i in $(seq 1 30); do
+            docker exec ci-db-restore pg_isready -U postgres > /dev/null 2>&1 && break
+            sleep 2
+          done
+          docker exec ci-db-restore pg_isready -U postgres
+
+      - name: Restore into the disposable target and verify roles survived
+        run: |
+          set -euo pipefail
+          globals=$(ls -1 /var/backups/db/*.globals.sql.gz | tail -n1)
+          dump=$(ls -1 /var/backups/db/*.dump | tail -n1)
+          bash scripts/restore_erp_db.sh \
+            --globals "$globals" \
+            --dump "$dump" \
+            --target-container ci-db-restore \
+            --target-db dotmac_erp_restored \
+            --require-roles app_admin,app_user
+
+      - name: The restored cluster must serve the seeded row
+        run: >-
+          docker exec ci-db-restore psql -X -v ON_ERROR_STOP=1 -U postgres
+          -d dotmac_erp_restored -Atc
+          "SELECT note FROM restore_rehearsal_canary WHERE id = 1"
+          | grep -qx 'survives the restore'
+
+      # A verification that cannot fail is not a verification. Strip the roles
+      # out of the globals artifact and re-restore: this reproduces EXACTLY the
+      # defect that was live in production, and the run must fail. If this step
+      # ever succeeds, the check above has stopped detecting anything.
+      - name: Sensitivity proof — a roleless backup must be rejected
+        run: |
+          set -euo pipefail
+          globals=$(ls -1 /var/backups/db/*.globals.sql.gz | tail -n1)
+          dump=$(ls -1 /var/backups/db/*.dump | tail -n1)
+          gzip -cd "$globals" | grep -vE '^CREATE ROLE |^ALTER ROLE ' \
+            | gzip -9 > /tmp/roleless.globals.sql.gz
+          docker rm -f ci-db-restore > /dev/null 2>&1 || true
+          docker run -d --name ci-db-roleless --network ci-net \
+            -e POSTGRES_USER=postgres -e POSTGRES_HOST_AUTH_METHOD=trust postgres:16
+          for i in $(seq 1 30); do
+            docker exec ci-db-roleless pg_isready -U postgres > /dev/null 2>&1 && break
+            sleep 2
+          done
+          if bash scripts/restore_erp_db.sh \
+               --globals /tmp/roleless.globals.sql.gz \
+               --dump "$dump" \
+               --target-container ci-db-roleless \
+               --target-db dotmac_erp_roleless \
+               --require-roles app_admin,app_user; then
+            echo "SENSITIVITY FAILURE: a roleless backup restored 'successfully'." >&2
+            echo "The role assertion has stopped detecting the production defect." >&2
+            exit 1
+          fi
+          echo "OK: the roleless backup was correctly rejected."
+          docker rm -f ci-db-roleless > /dev/null 2>&1 || true
+
       - name: Start application  # pragma: allowlist secret
         run: |  # pragma: allowlist secret
           docker run -d --name ci-app --network ci-net \
+            --read-only \
+            --user 10001:10001 \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
             -e DATABASE_URL=postgresql+psycopg://postgres:postgres@ci-db:5432/dotmac_erp_ci \
             -e SECRET_KEY=ci-test-secret-key-not-for-production \
             -e JWT_SECRET=ci-test-jwt-secret-key-minimum-32-bytes-long \
@@ -319,8 +520,7 @@ jobs:
             -e CELERY_BROKER_URL=redis://ci-redis:6379/0 \
             -e DOTMAC_DEV_MODE=true \
             -e GUNICORN_WORKERS=1 \
-            dotmac-erp:ci \
-            gunicorn -c gunicorn.conf.py app.main:app
+            dotmac-erp:ci
 
       - name: Wait for health check
         run: |
@@ -331,9 +531,9 @@ jobs:
               docker logs ci-app
               exit 1
             fi
-            HEALTH=$(docker exec ci-app python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8002/health').read().decode())" 2>/dev/null || echo "")
-            if echo "$HEALTH" | grep -q '"ok"'; then
-              echo "Health check passed: $HEALTH"
+            HEALTH=$(docker exec ci-app python -c "import json,urllib.request; payload=json.load(urllib.request.urlopen('http://localhost:8002/health/ready')); assert str(payload['status']).startswith('ready'); print(payload['status'])" 2>/dev/null || echo "")
+            if [[ "$HEALTH" == ready* ]]; then
+              echo "Readiness check passed: $HEALTH"
               exit 0
             fi
             echo "Waiting for app to be healthy... ($i/60)"
@@ -343,11 +543,245 @@ jobs:
           docker logs ci-app
           exit 1
 
+      # =====================================================================
+      # Served static identity.
+      #
+      # ERP served a stylesheet 198 insertions behind its own image for an
+      # unknown period, missing dark-mode and accent utilities. Two paths
+      # carried the checkout to the browser: a compose bind mount over
+      # /app/static, and sync-static.sh rsyncing the checkout into the nginx web
+      # root, which nginx served AHEAD of the application. Both are retired.
+      #
+      # Note what would NOT have caught it: an internal check of the image. The
+      # image was correct the whole time. Only comparing what is ACTUALLY SERVED
+      # against a recorded digest detects this, which is what these steps do.
+      # =====================================================================
+
+      - name: Served static tree must match the recorded digest
+        run: |
+          set -euo pipefail
+          expected=$(python -c "import json;print(json.load(open('deploy/static-tree-digest.json'))['tree_digest'])")
+          echo "descriptor records: $expected"
+          # Emit BOTH manifests before asserting. A bare digest mismatch says
+          # only "different", which costs a whole CI round-trip to diagnose;
+          # the per-file diff names the offending path immediately.
+          python scripts/static_tree_digest.py --manifest static > /tmp/checkout.manifest
+          python scripts/static_tree_digest.py --manifest --container ci-app /app/static > /tmp/image.manifest
+          echo "--- checkout vs image (left = checkout, right = image) ---"
+          diff -u /tmp/checkout.manifest /tmp/image.manifest || true
+          echo "--- end diff ---"
+          python scripts/static_tree_digest.py --container ci-app /app/static --expect "$expected"
+
+      - name: The externally served stylesheet must match, and carry the utilities that went missing
+        run: |
+          set -euo pipefail
+          # Fetched over HTTP from a SEPARATE container, so this exercises the
+          # real serving path rather than reading the filesystem. No heredoc:
+          # an indented terminator inside a YAML block scalar never closes.
+          docker run --rm --network ci-net dotmac-erp:ci python -c "
+          import sys, urllib.request
+          r = urllib.request.urlopen('http://ci-app:8002/static/css/app.css', timeout=15)
+          assert r.status == 200, r.status
+          sys.stdout.buffer.write(r.read())
+          " > /tmp/served.css
+          served_sha=$(sha256sum /tmp/served.css | cut -d" " -f1)
+          image_sha=$(docker exec ci-app sha256sum /app/static/css/app.css | cut -d" " -f1)
+          echo "served=$served_sha"
+          echo "image =$image_sha"
+          if [ "$served_sha" != "$image_sha" ]; then
+            echo "::error::the served stylesheet is not the image's stylesheet"
+            exit 1
+          fi
+          # The specific utilities the stale artifact was missing. A digest match
+          # alone would also be satisfied by two identically-wrong trees, so name
+          # the classes whose absence was the actual user-visible defect.
+          #
+          # Each of these is VERIFIED ABSENT from the pre-fix stylesheet at
+          # eb909214f and present after, so each is a real regression marker. An
+          # earlier draft included hover\:bg-accent-100, which was already
+          # present in the stale tree and would therefore have passed against
+          # the very artifact this check exists to reject.
+          missing=0
+          for needle in 'dark\:bg-blue-950' 'dark\:text-accent-300' 'border-accent-200' 'dark\:border-accent-800'; do
+            if ! grep -qF "$needle" /tmp/served.css; then
+              echo "::error::served stylesheet is missing $needle"
+              missing=1
+            fi
+          done
+          [ "$missing" = "0" ] || exit 1
+          echo "served stylesheet matches the image and carries the dark-mode/accent utilities."
+
+      - name: A planted checkout mutation must not change served bytes
+        run: |
+          set -euo pipefail
+          # The whole point of removing the mounts and the rsync. Corrupt the
+          # CHECKOUT copy and prove the running application is unmoved. Before
+          # this change, this mutation WOULD have reached browsers.
+          before=$(docker run --rm --network ci-net dotmac-erp:ci python -c "
+          import hashlib, urllib.request
+          print(hashlib.sha256(urllib.request.urlopen('http://ci-app:8002/static/css/app.css', timeout=15).read()).hexdigest())
+          ")
+          cp static/css/app.css /tmp/app.css.orig
+          echo '/* PLANTED BY CI: this must never reach a browser */' >> static/css/app.css
+          after=$(docker run --rm --network ci-net dotmac-erp:ci python -c "
+          import hashlib, urllib.request
+          print(hashlib.sha256(urllib.request.urlopen('http://ci-app:8002/static/css/app.css', timeout=15).read()).hexdigest())
+          ")
+          cp /tmp/app.css.orig static/css/app.css
+          echo "before=$before"
+          echo "after =$after"
+          if [ "$before" != "$after" ]; then
+            echo "::error::a checkout mutation changed the served stylesheet -- a mutable path back to production still exists"
+            exit 1
+          fi
+          # Sensitivity: the probe must be capable of noticing a change at all,
+          # or the equality above proves nothing. Verify it detects a genuinely
+          # different document.
+          other=$(docker run --rm --network ci-net dotmac-erp:ci python -c "
+          import hashlib, urllib.request
+          print(hashlib.sha256(urllib.request.urlopen('http://ci-app:8002/health/ready', timeout=15).read()).hexdigest())
+          ")
+          if [ "$other" = "$before" ]; then
+            echo "::error::the probe returns the same hash for different documents; it detects nothing"
+            exit 1
+          fi
+          echo "checkout mutation had no effect on served bytes, and the probe demonstrably discriminates."
+
+      - name: Start Celery worker and scheduler  # pragma: allowlist secret
+        run: |  # pragma: allowlist secret
+          set -euo pipefail
+          docker run -d --name ci-worker --network ci-net \
+            --read-only \
+            --user 10001:10001 \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            -e DATABASE_URL=postgresql+psycopg://postgres:postgres@ci-db:5432/dotmac_erp_ci \
+            -e SECRET_KEY=ci-test-secret-key-not-for-production \
+            -e JWT_SECRET=ci-test-jwt-secret-key-minimum-32-bytes-long \
+            -e TOTP_ENCRYPTION_KEY=QLUJktsTSfZEbST4R-37XmQ0tCkiVCBXZN2Zt053w8g= \
+            -e REDIS_URL=redis://ci-redis:6379/0 \
+            -e CELERY_BROKER_URL=redis://ci-redis:6379/0 \
+            -e CELERY_RESULT_BACKEND=redis://ci-redis:6379/1 \
+            -e DOTMAC_DEV_MODE=true \
+            dotmac-erp:ci \
+            celery -A app.celery_app worker -l info
+          docker run -d --name ci-beat --network ci-net \
+            --read-only \
+            --user 10001:10001 \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            -e DATABASE_URL=postgresql+psycopg://postgres:postgres@ci-db:5432/dotmac_erp_ci \
+            -e SECRET_KEY=ci-test-secret-key-not-for-production \
+            -e JWT_SECRET=ci-test-jwt-secret-key-minimum-32-bytes-long \
+            -e TOTP_ENCRYPTION_KEY=QLUJktsTSfZEbST4R-37XmQ0tCkiVCBXZN2Zt053w8g= \
+            -e REDIS_URL=redis://ci-redis:6379/0 \
+            -e CELERY_BROKER_URL=redis://ci-redis:6379/0 \
+            -e CELERY_RESULT_BACKEND=redis://ci-redis:6379/1 \
+            -e DOTMAC_DEV_MODE=true \
+            dotmac-erp:ci \
+            celery -A app.celery_app beat -l info
+
+      - name: Verify Celery worker and scheduler stay operational
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if [ "$(docker inspect --format='{{.State.Status}}' ci-worker 2>/dev/null || true)" = "exited" ]; then
+              docker logs ci-worker
+              exit 1
+            fi
+            if docker logs ci-worker 2>&1 | grep -q "ready"; then
+              break
+            fi
+            if [ "$i" = "30" ]; then
+              docker logs ci-worker
+              exit 1
+            fi
+            sleep 2
+          done
+          sleep 5
+          if [ "$(docker inspect --format='{{.State.Running}}' ci-beat 2>/dev/null || true)" != "true" ]; then
+            docker logs ci-beat
+            exit 1
+          fi
+          heartbeat=""
+          for i in $(seq 1 30); do
+            heartbeat=$(docker exec ci-beat stat -c %Y /tmp/dotmac-erp-beat-heartbeat 2>/dev/null || true)
+            if [[ "$heartbeat" =~ ^[0-9]+$ ]]; then
+              break
+            fi
+            if [ "$i" = "30" ]; then
+              docker logs ci-beat
+              exit 1
+            fi
+            sleep 2
+          done
+          age=$(( $(date +%s) - heartbeat ))
+          if (( age < 0 || age > 120 )); then
+            echo "Beat heartbeat is stale or future-dated: ${age}s" >&2
+            docker logs ci-beat
+            exit 1
+          fi
+
+      # Audit the same local image that the job exercised and later exports.
+      # The released foundation owns this contract; ERP does not maintain a
+      # second list of forbidden tools, paths, labels or runtime identities.
+      - name: Audit tested runtime image
+        env:
+          FORGEJO_READ_TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${FOUNDATION_IMAGE_AUDIT_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+[a-z0-9.]*$ ]]; then
+            echo "Foundation image-audit release is unresolved: ${FOUNDATION_IMAGE_AUDIT_VERSION}" >&2
+            exit 1
+          fi
+          python -m venv /tmp/dotmac-image-audit
+          /tmp/dotmac-image-audit/bin/python -m pip install \
+            --disable-pip-version-check \
+            --index-url "https://ci-reader:${FORGEJO_READ_TOKEN}@registry.dotmac.io/api/packages/dotmac/pypi/simple" \
+            "dotmac-deployment-foundation==${FOUNDATION_IMAGE_AUDIT_VERSION}"
+          docker image inspect dotmac-erp:ci > /tmp/inspect.json
+          docker history --no-trunc --format '{{.CreatedBy}}' dotmac-erp:ci \
+            | /tmp/dotmac-image-audit/bin/python -c \
+              'import json,sys; print(json.dumps(sys.stdin.read().splitlines()))' \
+            > /tmp/history.json
+          # Inspection runs as root so unreadable system directories cannot
+          # truncate the filesystem inventory. The audit independently verifies
+          # Config.User is the fixed non-root runtime identity.
+          docker run --rm --user 0:0 --entrypoint sh dotmac-erp:ci \
+            -c 'find / -xdev -type f' > /tmp/layers.txt
+          /tmp/dotmac-image-audit/bin/dotmac-deploy image-audit \
+            dotmac-erp:ci \
+            --inspect /tmp/inspect.json \
+            --history /tmp/history.json \
+            --layers /tmp/layers.txt
+
       - name: Cleanup
         if: always()
         run: |
-          docker rm -f ci-app ci-db ci-redis 2>/dev/null || true
+          docker rm -f ci-app ci-worker ci-beat ci-db ci-redis 2>/dev/null || true
           docker network rm ci-net 2>/dev/null || true
+
+      # GitHub job filesystems are isolated. Only a protected-main push needs
+      # the handoff: PRs still build and exercise the same image but never
+      # create a publication artifact. Saving after every runtime check passes
+      # makes the artifact, rather than a later rebuild, the release candidate.
+      - name: Export the tested image
+        if: success() && github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          docker image save dotmac-erp:ci | gzip -1 > tested-image.tar.gz
+
+      - name: Upload the tested image for publication
+        if: success() && github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tested-image-${{ github.sha }}
+          path: tested-image.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
 
   # ---------------------------------------------------------------------------
   # Integration Tests — PostgreSQL
@@ -384,6 +818,10 @@ jobs:
     env:
       DATABASE_URL: "postgresql+psycopg://postgres:postgres@localhost:5432/dotmac_erp_test"
       MIGRATION_DATABASE_URL: "postgresql+psycopg://app_admin@localhost:5432/dotmac_erp_test"
+      # CI has no previous serving image, so the activation drain premise is
+      # true for its disposable database. Production sets this only through
+      # scripts/deploy.sh --people-employment-type-activation.
+      PEOPLE_EMPLOYMENT_TYPE_ACTIVATION: "1"
       TEST_DATABASE_URL: "postgresql+psycopg://postgres:postgres@localhost:5432/dotmac_erp_test"
       JWT_SECRET: "ci-integration-test-secret-key-minimum-32-bytes"  # pragma: allowlist secret
       TOTP_ENCRYPTION_KEY: "QLUJktsTSfZEbST4R-37XmQ0tCkiVCBXZN2Zt053w8g="  # pragma: allowlist secret
@@ -469,13 +907,23 @@ jobs:
   # ---------------------------------------------------------------------------
   # Publish Docker Image to GHCR
   # Only runs on main branch after all checks pass.
-  # Tags: latest, sha-<short>, date (YYYY-MM-DD)
+  # Tags: latest, sha-<short revision> (deploy compatibility),
+  # sha-<full revision> (release evidence), date (YYYY-MM-DD)
   # ---------------------------------------------------------------------------
   publish-image:
     name: Publish Docker Image
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: [lint, type-check, test, docker-build, integration-test]
+    needs:
+      - lint
+      - type-check
+      - test
+      - security
+      - pre-commit
+      - secret-scan
+      - release-engineering-standards
+      - docker-build
+      - integration-test
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     permissions:
       contents: read
@@ -485,6 +933,26 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Download the tested image
+        uses: actions/download-artifact@v4
+        with:
+          name: tested-image-${{ github.sha }}
+
+      - name: Load the tested image
+        run: |
+          set -euo pipefail
+          gzip -dc tested-image.tar.gz | docker image load
+          docker image inspect dotmac-erp:ci > /dev/null
+
+      - name: Verify tested image release identity
+        id: product-manifest
+        run: |
+          set -euo pipefail
+          manifest_digest="sha256:$(sha256sum deploy/product-manifest.json | cut -d ' ' -f 1)"
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' dotmac-erp:ci)" = "${GITHUB_SHA}"
+          test "$(docker image inspect --format '{{index .Config.Labels "io.dotmac.product-manifest.digest"}}' dotmac-erp:ci)" = "${manifest_digest}"
+          echo "digest=${manifest_digest}" >> "${GITHUB_OUTPUT}"
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -501,16 +969,103 @@ jobs:
           tags: |
             type=raw,value=latest
             type=sha,prefix=sha-,format=short
+            type=sha,prefix=sha-,format=long
             type=raw,value={{date 'YYYY-MM-DD'}}
 
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v6
+      - name: Tag and push the tested image
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r image_tag; do
+            if [ -n "${image_tag}" ]; then
+              docker image tag dotmac-erp:ci "${image_tag}"
+              docker image push "${image_tag}"
+            fi
+          done <<< "${IMAGE_TAGS}"
+
+      - name: Resolve the registry digest of the tested image
+        id: registry
+        env:
+          IMMUTABLE_IMAGE_TAG: ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # The OCI digest is the SHA-256 of the exact raw registry-manifest
+          # bytes. Buildx's human display is not a machine-readable contract,
+          # while `--raw` returns those bytes unchanged.
+          manifest_sha="$(docker buildx imagetools inspect --raw \
+            "${IMMUTABLE_IMAGE_TAG}" | sha256sum | cut -d ' ' -f 1)"
+          image_digest="sha256:${manifest_sha}"
+          if [[ ! "${image_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "registry returned an invalid image digest" >&2
+            exit 1
+          fi
+          echo "digest=${image_digest}" >> "${GITHUB_OUTPUT}"
+
+      - name: Persist immutable image release evidence
+        env:
+          IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}
+          IMAGE_DIGEST: ${{ steps.registry.outputs.digest }}
+        run: >-
+          python3 scripts/write_image_release.py
+          --repository "${IMAGE_REPOSITORY}"
+          --digest "${IMAGE_DIGEST}"
+          --git-sha "${GITHUB_SHA}"
+          --manifest-digest "${{ steps.product-manifest.outputs.digest }}"
+          --output image-release.json
+
+      - name: Upload immutable image release evidence
+        uses: actions/upload-artifact@v4
         with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          secrets: |
-            forgejo_token=${{ secrets.FORGEJO_READ_TOKEN }}
+          name: image-release-${{ github.sha }}
+          path: image-release.json
+          if-no-files-found: error
+          retention-days: 90
+
+  # ===========================================================================
+  # The committed stylesheet must equal a fresh build.
+  #
+  # docker-compose.yml used to bind-mount ./static over /app/static, so the
+  # CHECKOUT's committed static/css/app.css shadowed the one the image's
+  # css-builder stage compiles from src/css. Production therefore served the
+  # committed artifact, and the image's freshly built one was never used.
+  #
+  # That mount is gone, so the image's compiled stylesheet is now what ships.
+  # This job is what makes that swap provably behaviour-preserving instead of a
+  # silent visual change: if the committed artifact has drifted from a fresh
+  # build, the diff below fails and the artifact must be regenerated in the same
+  # change. The previous image check only ran `test -r .../app.css` -- existence,
+  # not content, which would not have caught drift at all.
+  # ===========================================================================
+  css-drift:
+    name: Compiled stylesheet is in sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      # `npm ci`, not `install`: fails loudly on lockfile drift instead of
+      # silently rewriting it. Same command the image's css-builder stage runs.
+      - name: Install CSS toolchain
+        run: npm ci --silent
+
+      - name: Rebuild the stylesheet
+        run: npm run build:css
+
+      - name: The committed stylesheet must match the rebuild
+        run: |
+          if ! git diff --quiet -- static/css/app.css; then
+            echo "::error::static/css/app.css differs from a fresh build."
+            echo "The image compiles this file, and the compose bind mount that"
+            echo "used to shadow it with the committed copy has been removed --"
+            echo "so this drift would change what production serves."
+            echo "Run 'npm run build:css' and commit the result."
+            git diff --stat -- static/css/app.css
+            exit 1
+          fi
+          echo "Committed stylesheet matches a fresh build."

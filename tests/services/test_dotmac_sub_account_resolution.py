@@ -19,6 +19,7 @@ from unittest.mock import MagicMock
 from app.services.dotmac_sub.client import (
     DotmacSubNotFoundError,
     DotmacSubRateLimitError,
+    SubscriberRecord,
 )
 from app.services.dotmac_sub.sync._base import BaseSyncMixin
 
@@ -77,3 +78,23 @@ def test_rate_limited_subscriber_lookup_skips_billing_account_fallback() -> None
     assert harness._get_customer_for_account("acct-2") is None
     assert harness.client.get_subscriber.call_count == 1
     harness.client.get_billing_account.assert_not_called()
+
+
+def test_embedded_subscriber_resolves_without_detail_request() -> None:
+    harness = _AccountResolveHarness()
+    customer = MagicMock(customer_id="customer-1")
+    harness._get_customer_by_dotmac_sub_id = MagicMock(side_effect=[None, customer])
+    harness._sync_single_subscriber = MagicMock()
+    harness._cache_reseller = MagicMock()
+    subscriber = SubscriberRecord(
+        id="acct-3",
+        display_name="Embedded Subscriber",
+        reseller_id="reseller-1",
+    )
+
+    assert harness._resolve_account_owner("acct-3", subscriber) == "customer-1"
+
+    harness.client.get_subscriber.assert_not_called()
+    harness.client.get_billing_account.assert_not_called()
+    harness._cache_reseller.assert_called_once_with("reseller-1")
+    harness._sync_single_subscriber.assert_called_once()

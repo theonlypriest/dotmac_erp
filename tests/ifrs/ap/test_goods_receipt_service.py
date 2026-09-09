@@ -89,7 +89,6 @@ class MockPurchaseOrder:
         po_number="PO-000001",
         status=None,
         lines=None,
-        amount_received=Decimal("0"),
     ):
         self.po_id = po_id or uuid4()
         self.organization_id = organization_id or uuid4()
@@ -97,7 +96,6 @@ class MockPurchaseOrder:
         self.po_number = po_number
         self.status = status or MockPOStatus()
         self._lines = lines or []
-        self.amount_received = amount_received
 
     @property
     def lines(self):
@@ -979,8 +977,14 @@ class TestInternalMethods:
 
         GoodsReceiptService._update_po_status(db, mock_po)
 
-        assert mock_po.amount_received == Decimal("500.00")
         assert mock_po.status == mock_partial
+        # The method decides STATUS from the line quantities and writes no
+        # amount. `amount_received` is derived by
+        # `app.services.finance.ap.purchase_order_amounts`; this used to be a
+        # second writer of it, recomputing it absolutely while the PO service
+        # incremented it. The mock has no such attribute, so a reinstated write
+        # would show up here as one appearing.
+        assert not hasattr(mock_po, "amount_received")
 
     @patch("app.services.finance.ap.goods_receipt.POStatus")
     def test_update_po_status_fully_received(self, mock_po_status):
@@ -1002,8 +1006,8 @@ class TestInternalMethods:
 
         GoodsReceiptService._update_po_status(db, mock_po)
 
-        assert mock_po.amount_received == Decimal("1000.00")
         assert mock_po.status == mock_received
+        assert not hasattr(mock_po, "amount_received")
 
     @patch(
         "app.services.finance.ap.goods_receipt.GoodsReceiptService._update_po_status"

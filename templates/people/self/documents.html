@@ -14,7 +14,44 @@
 {% endblock %}
 
 {% block content %}
-<div class="mx-auto max-w-5xl space-y-6">
+<div class="mx-auto max-w-5xl space-y-6" x-data='{ activeSection: "all" }'>
+    <div class="card p-5">
+        <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+                <h3 class="text-base font-semibold text-slate-900 dark:text-white">Extended Profile</h3>
+                <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Review documents and submit approval-based profile updates without leaving this page.</p>
+            </div>
+            <nav class="flex flex-wrap gap-2" aria-label="Extended profile sections">
+                <a href="/people/self/documents" class="btn btn-secondary"
+                   hx-get="/people/self/documents" hx-target="#extended-profile-content"
+                   hx-select="#extended-profile-content" hx-swap="outerHTML"
+                   @click="activeSection = 'all'"
+                   :class="{ 'border-violet-300 bg-violet-50 dark:border-violet-700 dark:bg-violet-900/20': activeSection === 'all' }">All</a>
+                <a href="/people/self/qualifications" class="btn btn-secondary"
+                   hx-get="/people/self/qualifications" hx-target="#extended-profile-content"
+                   hx-select="#extended-profile-content" hx-swap="outerHTML"
+                   @click="activeSection = 'qualifications'"
+                   :class="{ 'border-violet-300 bg-violet-50 dark:border-violet-700 dark:bg-violet-900/20': activeSection === 'qualifications' }">Qualifications</a>
+                <a href="/people/self/certifications" class="btn btn-secondary"
+                   hx-get="/people/self/certifications" hx-target="#extended-profile-content"
+                   hx-select="#extended-profile-content" hx-swap="outerHTML"
+                   @click="activeSection = 'certifications'"
+                   :class="{ 'border-violet-300 bg-violet-50 dark:border-violet-700 dark:bg-violet-900/20': activeSection === 'certifications' }">Certifications</a>
+                <a href="/people/self/skills" class="btn btn-secondary"
+                   hx-get="/people/self/skills" hx-target="#extended-profile-content"
+                   hx-select="#extended-profile-content" hx-swap="outerHTML"
+                   @click="activeSection = 'skills'"
+                   :class="{ 'border-violet-300 bg-violet-50 dark:border-violet-700 dark:bg-violet-900/20': activeSection === 'skills' }">Skills</a>
+                <a href="/people/self/dependents" class="btn btn-secondary"
+                   hx-get="/people/self/dependents" hx-target="#extended-profile-content"
+                   hx-select="#extended-profile-content" hx-swap="outerHTML"
+                   @click="activeSection = 'dependents'"
+                   :class="{ 'border-violet-300 bg-violet-50 dark:border-violet-700 dark:bg-violet-900/20': activeSection === 'dependents' }">Dependants</a>
+            </nav>
+        </div>
+    </div>
+
+    <div id="extended-profile-content" class="space-y-6">
     <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
             <h2 class="text-2xl font-semibold text-slate-900 dark:text-white">My Documents</h2>
@@ -36,21 +73,6 @@
         {{ error }}
     </div>
     {% endif %}
-
-    <div class="card p-5">
-        <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-                <h3 class="text-base font-semibold text-slate-900 dark:text-white">Extended Profile</h3>
-                <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Related approval-based profile updates.</p>
-            </div>
-            <div class="flex flex-wrap gap-2">
-                <a href="/people/self/qualifications" class="btn btn-secondary">Qualifications</a>
-                <a href="/people/self/certifications" class="btn btn-secondary">Certifications</a>
-                <a href="/people/self/skills" class="btn btn-secondary">Skills</a>
-                <a href="/people/self/dependents" class="btn btn-secondary">Dependants</a>
-            </div>
-        </div>
-    </div>
 
     <div class="card overflow-hidden">
         <div class="border-b border-slate-200 px-6 py-4 dark:border-slate-700">
@@ -141,6 +163,7 @@
         {% else %}
         <div class="px-6 py-8 text-sm text-slate-500 dark:text-slate-400">No rejected or expired document requests yet.</div>
         {% endif %}
+    </div>
     </div>
 </div>
 {% endblock %}

@@ -17,7 +17,6 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.people.hr.employee import Employee
-from app.models.people.hr.employment_type import EmploymentType
 from app.models.people.payroll.employee_tax_profile import EmployeeTaxProfile
 from app.models.people.payroll.salary_slip import (
     SalarySlip,
@@ -32,12 +31,16 @@ from app.services.common import (
     coerce_uuid,
     paginate,
 )
+from app.services.people.hr.employment_types import EmploymentTypeService
 from app.services.people.payroll import (
     PayrollGLAdapter,
     SalarySlipInput,
     salary_slip_service,
 )
 from app.services.people.payroll.eligibility import payroll_employee_eligibility_clause
+from app.services.people.payroll.employment_type_classification import (
+    classify_payroll_employment_type,
+)
 from app.services.people.payroll.paye_calculator import PAYECalculator
 from app.services.people.payroll_reporting import REPORTABLE_SLIP_STATUSES
 from app.templates import templates
@@ -82,6 +85,7 @@ class SlipWebService:
         db: Session,
         search: str | None = None,
         status: str | None = None,
+        employment_type_id: str | None = None,
         page: int = 1,
     ) -> HTMLResponse | RedirectResponse:
         """Render salary slips list page."""
@@ -114,6 +118,15 @@ class SlipWebService:
         if end_date:
             query = query.where(SalarySlip.start_date <= end_date)
 
+        parsed_employment_type_id = parse_uuid(employment_type_id)
+        if parsed_employment_type_id:
+            query = query.join(
+                Employee, SalarySlip.employee_id == Employee.employee_id
+            ).where(
+                Employee.organization_id == org_id,
+                Employee.employment_type_id == parsed_employment_type_id,
+            )
+
         query = query.order_by(SalarySlip.created_at.desc())
         result = paginate(db, query, PaginationParams.from_page(page, per_page))
         if page > result.total_pages:
@@ -138,6 +151,8 @@ class SlipWebService:
                 or 0
             )
             status_counts[s.value] = count
+
+        employment_types = list(EmploymentTypeService(db, org_id).iter_all(active=True))
 
         active_filters = []
         if status_enum:
@@ -172,6 +187,25 @@ class SlipWebService:
                     "display_value": f"To: {end_date.strftime('%d %b %Y')}",
                 }
             )
+        if parsed_employment_type_id:
+            selected_employment_type = next(
+                (
+                    employment_type
+                    for employment_type in employment_types
+                    if employment_type.employment_type_id == parsed_employment_type_id
+                ),
+                None,
+            )
+            if selected_employment_type:
+                active_filters.append(
+                    {
+                        "name": "employment_type_id",
+                        "value": str(parsed_employment_type_id),
+                        "display_value": (
+                            f"Employment type: {selected_employment_type.type_name}"
+                        ),
+                    }
+                )
 
         context = base_context(request, auth, "Salary Slips", "payroll", db=db)
         context["request"] = request
@@ -183,6 +217,10 @@ class SlipWebService:
                 "status_group": status_group,
                 "start_date": start_date.isoformat() if start_date else "",
                 "end_date": end_date.isoformat() if end_date else "",
+                "employment_type_id": (
+                    str(parsed_employment_type_id) if parsed_employment_type_id else ""
+                ),
+                "employment_types": employment_types,
                 "page": page,
                 "total_pages": total_pages,
                 "total_count": total,
@@ -204,6 +242,7 @@ class SlipWebService:
         db: Session,
         search: str | None = None,
         status: str | None = None,
+        employment_type_id: str | None = None,
     ) -> Response:
         """Export salary slips to CSV."""
         org_id = coerce_uuid(auth.organization_id)
@@ -240,6 +279,15 @@ class SlipWebService:
             query = query.where(SalarySlip.start_date >= start_date)
         if end_date:
             query = query.where(SalarySlip.start_date <= end_date)
+
+        parsed_employment_type_id = parse_uuid(employment_type_id)
+        if parsed_employment_type_id:
+            query = query.join(
+                Employee, SalarySlip.employee_id == Employee.employee_id
+            ).where(
+                Employee.organization_id == org_id,
+                Employee.employment_type_id == parsed_employment_type_id,
+            )
 
         slips = db.scalars(query.order_by(SalarySlip.created_at.desc())).all()
 
@@ -790,25 +838,14 @@ class SlipWebService:
             db.get(SalaryStructure, slip.structure_id) if slip.structure_id else None
         )
         if employee and structure:
-            employment_type = employee.employment_type
-            if employment_type is None and employee.employment_type_id:
-                employment_type = db.get(EmploymentType, employee.employment_type_id)
-
-            type_code = (
-                (employment_type.type_code or "").strip().lower()
-                if employment_type
-                else ""
+            classification = classify_payroll_employment_type(
+                db,
+                organization_id=org_id,
+                employment_type_id=employee.employment_type_id,
             )
-            type_name = (
-                (employment_type.type_name or "").strip().lower()
-                if employment_type
-                else ""
+            skip_deductions = classification.is_contract_staff(
+                structure_name=structure.structure_name
             )
-            is_contract = type_code == "contract" or type_name == "contract"
-            is_contract_structure = (
-                structure.structure_name or ""
-            ).strip().lower() == "contract staff"
-            skip_deductions = is_contract or is_contract_structure
 
         if slip.employee_id:
             tax_profile = db.scalar(

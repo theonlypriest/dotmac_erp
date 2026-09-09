@@ -162,26 +162,27 @@ class InvoiceWebService:
         ]
         # Build stats using the same base filters as a subquery source
         outstanding_base = base_stmt.where(SupplierInvoice.status.in_(open_statuses))
+        outstanding_subquery = outstanding_base.subquery()
 
-        balance_expr = func.coalesce(func.sum(SupplierInvoice.balance_due), 0)
+        balance_expr = func.coalesce(func.sum(outstanding_subquery.c.balance_due), 0)
 
         total_outstanding = db.scalar(
-            select(balance_expr).select_from(outstanding_base.subquery())
+            select(balance_expr).select_from(outstanding_subquery)
         ) or Decimal("0")
 
         past_due = db.scalar(
-            select(balance_expr).select_from(
-                outstanding_base.where(SupplierInvoice.due_date < today).subquery()
-            )
+            select(balance_expr)
+            .select_from(outstanding_subquery)
+            .where(outstanding_subquery.c.due_date < today)
         ) or Decimal("0")
 
         due_this_week_end = today + timedelta(days=7)
         due_this_week = db.scalar(
-            select(balance_expr).select_from(
-                outstanding_base.where(
-                    SupplierInvoice.due_date >= today,
-                    SupplierInvoice.due_date <= due_this_week_end,
-                ).subquery()
+            select(balance_expr)
+            .select_from(outstanding_subquery)
+            .where(
+                outstanding_subquery.c.due_date >= today,
+                outstanding_subquery.c.due_date <= due_this_week_end,
             )
         ) or Decimal("0")
 

@@ -285,6 +285,14 @@ def _builtin_beat_schedule() -> dict[str, dict]:
             "task": "app.tasks.expense.poll_stuck_expense_transfers",
             "schedule": crontab(minute="*/2"),  # Every 2 minutes
         },
+        # Slower lane: payouts whose outcome was never observed. Hourly, not
+        # every two minutes — these have already exhausted the fast loop, and
+        # re-asking at that cadence is load without information. See
+        # INDETERMINATE_RECHECK_INTERVAL in the payment service (ADR-0007).
+        "expense-unresolved-transfers": {
+            "task": "app.tasks.expense.reconcile_unresolved_expense_transfers",
+            "schedule": crontab(minute=17),  # Hourly, off the busy minute
+        },
         "notification-email-dispatch": {
             "task": "app.tasks.notifications.process_pending_notification_emails",
             "schedule": timedelta(minutes=1),  # Every minute
@@ -322,10 +330,9 @@ def _builtin_beat_schedule() -> dict[str, dict]:
             "task": "app.tasks.inventory.send_low_stock_notifications",
             "schedule": crontab(hour=7, minute=15),  # Daily at 7:15 AM
         },
-        "dotmac-sub-incremental-sync": {
-            "task": "app.tasks.dotmac_sub.run_dotmac_sub_incremental_sync",
-            "schedule": crontab(minute="*/30"),  # Every 30 minutes
-        },
+        # dotmac_sub incremental sync is DB-owned through ScheduledTask. Keeping
+        # a builtin entry here as well dispatches two overlapping runs every 30
+        # minutes and can exhaust the worker pool when the connector is slow.
         "recurring-templates": {
             "task": "app.tasks.automation.process_recurring_templates",
             "schedule": crontab(hour="*/6", minute=5),  # Every 6 hours at :05
@@ -344,8 +351,8 @@ def _builtin_beat_schedule() -> dict[str, dict]:
         },
         "dotmac-sub-stale-history-cleanup": {
             "task": "app.tasks.dotmac_sub.cleanup_stale_dotmac_sub_sync_history",
-            "schedule": crontab(minute=17),  # Hourly at :17
-            "kwargs": {"stale_after_minutes": 180, "limit": 500},
+            "schedule": crontab(minute="*/5"),
+            "kwargs": {"stale_after_minutes": 15, "limit": 500},
         },
         # ── Outbox relay tasks ──────────────────────────────────
         "outbox-relay": {

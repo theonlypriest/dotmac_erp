@@ -752,7 +752,11 @@ class PurchaseOrderService(ListResponseMixin):
                 status_code=400, detail=f"Cannot cancel PO in {po.status.value} status"
             )
 
-        if po.amount_received > 0:
+        # Derived, not read off the row.  `amount_received` is no longer a
+        # column; `purchase_order_amounts` is its sole owner.
+        from app.services.finance.ap.purchase_order_amounts import received_for
+
+        if received_for(db, org_id, po_id) > 0:
             raise HTTPException(
                 status_code=400, detail="Cannot cancel PO with received goods"
             )
@@ -825,48 +829,14 @@ class PurchaseOrderService(ListResponseMixin):
 
         return po
 
-    @staticmethod
-    def update_received_amount(
-        db: Session,
-        po_id: UUID,
-        amount_received: Decimal,
-        organization_id: UUID | None = None,
-    ) -> PurchaseOrder:
-        """
-        Update the received amount on a PO (called by GoodsReceiptService).
-
-        Args:
-            db: Database session
-            po_id: Purchase order ID
-            amount_received: Amount received to add
-            organization_id: Organization scope for multi-tenancy check
-
-        Returns:
-            Updated PurchaseOrder
-        """
-        po_id = coerce_uuid(po_id)
-
-        stmt = select(PurchaseOrder).where(PurchaseOrder.po_id == po_id)
-        if organization_id:
-            stmt = stmt.where(
-                PurchaseOrder.organization_id == coerce_uuid(organization_id),
-            )
-        po = db.scalars(stmt).first()
-
-        if not po:
-            raise HTTPException(status_code=404, detail="Purchase order not found")
-
-        po.amount_received += amount_received
-
-        # Update status based on received amount
-        if po.amount_received >= po.total_amount:
-            po.status = POStatus.RECEIVED
-        elif po.amount_received > 0:
-            po.status = POStatus.PARTIALLY_RECEIVED
-
-        db.flush()
-
-        return po
+    # `update_received_amount` was DELETED here.
+    #
+    # It incremented `po.amount_received` by a caller-supplied delta while
+    # `GoodsReceiptService._update_po_status` recomputed the same column
+    # absolutely from the PO lines — two writers with different arithmetic on one
+    # column.  Nothing in `app/` called it; only tests did.  The received amount
+    # is now derived by `app.services.finance.ap.purchase_order_amounts`, which
+    # is its sole owner.  Do not reintroduce a setter here.
 
     @staticmethod
     def get(

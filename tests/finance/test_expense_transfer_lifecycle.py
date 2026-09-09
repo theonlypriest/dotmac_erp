@@ -33,8 +33,15 @@ from app.models.finance.payments.payment_intent import (
     PaymentIntentStatus,
 )
 from app.models.finance.payments.payment_webhook import WebhookStatus
-from app.services.finance.payments.payment_service import PaymentService
-from app.services.finance.payments.paystack_client import PaystackConfig, PaystackError
+from app.services.finance.payments.payment_service import (
+    PaymentService,
+    TransferOutcomeUnknown,
+)
+from app.services.finance.payments.paystack_client import (
+    PaystackConfig,
+    PaystackError,
+    PaystackUnreachable,
+)
 from app.services.finance.payments.webhook_service import WebhookService
 
 # ---------------------------------------------------------------------------
@@ -100,6 +107,7 @@ def _make_intent(
         updated_at=None,
         poll_count=poll_count,
         last_poll_error=None,
+        unresolved_since=None,
     )
 
 
@@ -175,12 +183,15 @@ def _make_paystack_verify_result(
 def _paystack_client_context(
     initiate_result: SimpleNamespace | None = None,
     verify_result: SimpleNamespace | None = None,
+    verify_error: Exception | None = None,
 ) -> MagicMock:
     """Return a context-manager mock for PaystackClient."""
     client = MagicMock()
     if initiate_result:
         client.initiate_transfer.return_value = initiate_result
-    if verify_result:
+    if verify_error is not None:
+        client.verify_transfer.side_effect = verify_error
+    elif verify_result:
         client.verify_transfer.return_value = verify_result
     cm = MagicMock()
     cm.__enter__ = MagicMock(return_value=client)
@@ -441,6 +452,77 @@ class TestInitiateExpenseTransfer:
         paystack_client.initiate_transfer.assert_called_once()
         db.commit.assert_called()
         db.refresh.assert_called_with(intent)
+
+    def test_an_unobserved_initiation_is_recorded_indeterminate(self) -> None:
+        """The request left this process and Paystack never said what became
+        of it. Leaving the row PENDING was the old behaviour and it is a trap:
+        the expiry pass eventually stamps it EXPIRED, and an expired-looking
+        intent is one nobody chases (ADR-0007)."""
+        org_id = _org_id()
+        db = MagicMock()
+        claim = _make_claim(org_id=org_id)
+        intent = _make_intent(org_id=org_id, source_id=claim.claim_id)
+
+        # The first lookup locks the claim; recording the unresolved outcome
+        # then checks whether a legacy transfer-batch item exists.
+        db.scalar.side_effect = [claim, None]
+        client_cm = _paystack_client_context()
+        client = client_cm.__enter__.return_value
+        client.initiate_transfer.side_effect = PaystackUnreachable(
+            "Request failed: connect timeout"
+        )
+        client.verify_transfer.side_effect = PaystackUnreachable(
+            "Request failed: connect timeout"
+        )
+
+        svc = self._svc(db, org_id)
+
+        with patch(
+            "app.services.finance.payments.payment_service.PaystackClient",
+            return_value=client_cm,
+        ):
+            with pytest.raises(TransferOutcomeUnknown) as excinfo:
+                svc.initiate_expense_transfer(intent, _CFG)
+
+        assert excinfo.value.intent_id == intent.intent_id
+        assert intent.status == PaymentIntentStatus.INDETERMINATE
+        assert intent.unresolved_since is not None
+        assert intent.gateway_response["unobserved_initiation"] is True
+        # Committed: this path is about to raise out of the request, and
+        # without the commit the only record is a log line.
+        db.commit.assert_called()
+        # The claim is NOT marked paid and NOT reverted — it stays approved.
+        assert claim.status == ExpenseClaimStatus.APPROVED
+
+    def test_a_provider_refusal_at_initiation_stays_pending_and_reraises(
+        self,
+    ) -> None:
+        """Specificity: Paystack answered, so nothing is in flight and the
+        intent stays PENDING and legitimately retryable."""
+        org_id = _org_id()
+        db = MagicMock()
+        claim = _make_claim(org_id=org_id)
+        intent = _make_intent(org_id=org_id, source_id=claim.claim_id)
+
+        db.scalar.return_value = claim
+        client_cm = _paystack_client_context()
+        client = client_cm.__enter__.return_value
+        client.initiate_transfer.side_effect = PaystackError(
+            "Failed to initiate transfer: insufficient balance"
+        )
+
+        svc = self._svc(db, org_id)
+
+        with patch(
+            "app.services.finance.payments.payment_service.PaystackClient",
+            return_value=client_cm,
+        ):
+            with pytest.raises(PaystackError):
+                svc.initiate_expense_transfer(intent, _CFG)
+
+        assert intent.status == PaymentIntentStatus.PENDING
+        assert intent.unresolved_since is None
+        client.verify_transfer.assert_not_called()
 
     def test_timeout_recovers_by_verifying_reference(self) -> None:
         """A timeout during initiation should reconcile by transfer reference."""
@@ -1083,6 +1165,68 @@ class TestReconcileStuckTransfer:
         assert result.outcome.value == "completed"
         assert result.poll_count == 1
 
+    def test_an_unreachable_provider_yields_indeterminate_not_failed(self) -> None:
+        """The circuit breaker stops the polling; it does not decide the money.
+
+        Ten unanswered attempts and one refusal are different facts, and this
+        method used to record them identically (ADR-0007).
+        """
+        org_id = _org_id()
+        db = MagicMock()
+        intent = _make_intent(
+            org_id=org_id,
+            status=PaymentIntentStatus.PROCESSING,
+            transfer_code="TRF_amb",
+            poll_count=9,
+        )
+        db.scalars.return_value.one_or_none.return_value = intent
+        db.scalar.return_value = None
+
+        client_cm = _paystack_client_context(
+            verify_error=PaystackUnreachable("Request failed: connect timeout")
+        )
+
+        svc = self._svc(db, org_id)
+
+        with patch(
+            "app.services.finance.payments.payment_service.PaystackClient",
+            return_value=client_cm,
+        ):
+            result = svc.reconcile_stuck_transfer(intent.intent_id, _CFG)
+
+        assert intent.status == PaymentIntentStatus.INDETERMINATE
+        assert intent.unresolved_since is not None
+        assert result.outcome.value == "indeterminate"
+
+    def test_a_provider_refusal_at_the_budget_yields_failed(self) -> None:
+        """Specificity: FAILED did not simply stop being reachable."""
+        org_id = _org_id()
+        db = MagicMock()
+        intent = _make_intent(
+            org_id=org_id,
+            status=PaymentIntentStatus.PROCESSING,
+            transfer_code="TRF_amb",
+            poll_count=9,
+        )
+        db.scalars.return_value.one_or_none.return_value = intent
+        db.scalar.return_value = None
+
+        client_cm = _paystack_client_context(
+            verify_error=PaystackError("Transfer not found")
+        )
+
+        svc = self._svc(db, org_id)
+
+        with patch(
+            "app.services.finance.payments.payment_service.PaystackClient",
+            return_value=client_cm,
+        ):
+            result = svc.reconcile_stuck_transfer(intent.intent_id, _CFG)
+
+        assert intent.status == PaymentIntentStatus.FAILED
+        assert intent.unresolved_since is None
+        assert result.outcome.value == "abandoned"
+
     @pytest.mark.parametrize(
         "settled",
         [
@@ -1090,6 +1234,13 @@ class TestReconcileStuckTransfer:
             PaymentIntentStatus.FAILED,
             PaymentIntentStatus.REVERSED,
             PaymentIntentStatus.EXPIRED,
+            # INDETERMINATE is not settled — it is the opposite of settled —
+            # but the fast poller must leave it alone for the same reason: it
+            # re-proves PENDING/PROCESSING under the lock, so an unresolved
+            # intent drops out of the two-minute loop by construction and
+            # stays selectable by `find_indeterminate_transfer_intents`
+            # without burning an attempt (ADR-0007).
+            PaymentIntentStatus.INDETERMINATE,
         ],
     )
     def test_an_already_settled_intent_is_left_alone(
@@ -1129,6 +1280,184 @@ class TestReconcileStuckTransfer:
         result = self._svc(db, org_id).reconcile_stuck_transfer(uuid.uuid4(), _CFG)
 
         assert result.outcome.value == "skipped"
+
+
+class TestResolveIndeterminateTransfer:
+    """The only writer permitted to move an intent out of INDETERMINATE."""
+
+    def _svc(self, db: MagicMock, org_id: uuid.UUID) -> PaymentService:
+        svc = PaymentService.__new__(PaymentService)
+        svc.db = db
+        svc.organization_id = org_id
+        return svc
+
+    def _unresolved(self, org_id: uuid.UUID, *, hours_ago: float = 1.0) -> Any:
+        intent = _make_intent(
+            org_id=org_id,
+            status=PaymentIntentStatus.INDETERMINATE,
+            transfer_code="TRF_unknown",
+            poll_count=10,
+            bank_account_id=None,
+        )
+        intent.unresolved_since = datetime.now(UTC) - timedelta(hours=hours_ago)
+        return intent
+
+    def test_a_real_verdict_resolves_it_and_clears_the_clock(self) -> None:
+        org_id = _org_id()
+        db = MagicMock()
+        claim = _make_claim(org_id=org_id)
+        intent = self._unresolved(org_id)
+        intent.source_id = claim.claim_id
+
+        db.scalars.return_value.one_or_none.return_value = intent
+        db.execute.return_value.scalar_one_or_none.return_value = intent
+        db.get.return_value = claim
+        db.scalar.return_value = None
+
+        client_cm = _paystack_client_context(
+            verify_result=_make_paystack_verify_result(status="success")
+        )
+
+        svc = self._svc(db, org_id)
+
+        with (
+            patch(
+                "app.services.finance.payments.payment_service.PaystackClient",
+                return_value=client_cm,
+            ),
+            _patch_expense_mark_paid(db),
+            patch.object(
+                PaymentService,
+                "resolve_transfer_unresolved_alert_threshold",
+                return_value=timedelta(hours=6),
+            ),
+        ):
+            result = svc.resolve_indeterminate_transfer(intent.intent_id, _CFG)
+
+        assert intent.status == PaymentIntentStatus.COMPLETED
+        assert intent.unresolved_since is None
+        assert result.outcome.value == "completed"
+
+    def test_still_no_answer_keeps_it_unresolved_and_never_settles(self) -> None:
+        """No attempt cap and no give-up branch: a budget here would rebuild
+        the defect one level up, out of repeated silence rather than one
+        silence."""
+        org_id = _org_id()
+        db = MagicMock()
+        intent = self._unresolved(org_id)
+        started_at = intent.unresolved_since
+
+        db.scalars.return_value.one_or_none.return_value = intent
+        db.scalar.return_value = None
+
+        client_cm = _paystack_client_context(
+            verify_error=PaystackUnreachable("Request failed: connect timeout")
+        )
+
+        svc = self._svc(db, org_id)
+
+        with (
+            patch(
+                "app.services.finance.payments.payment_service.PaystackClient",
+                return_value=client_cm,
+            ),
+            patch.object(
+                PaymentService,
+                "resolve_transfer_unresolved_alert_threshold",
+                return_value=timedelta(hours=6),
+            ),
+        ):
+            result = svc.resolve_indeterminate_transfer(intent.intent_id, _CFG)
+
+        assert intent.status == PaymentIntentStatus.INDETERMINATE
+        assert result.outcome.value == "still_unresolved"
+        # The clock is NOT restarted, or nothing would ever age into an alert.
+        assert intent.unresolved_since == started_at
+
+    def test_an_intent_that_resolved_under_the_worker_is_skipped(self) -> None:
+        """Selected in one session, settled by a webhook before this ran. The
+        premise is re-proved under the lock (ADR-0005 section 3)."""
+        org_id = _org_id()
+        db = MagicMock()
+        intent = _make_intent(
+            org_id=org_id,
+            status=PaymentIntentStatus.COMPLETED,
+            transfer_code="TRF_unknown",
+            poll_count=10,
+        )
+        db.scalars.return_value.one_or_none.return_value = intent
+
+        svc = self._svc(db, org_id)
+
+        with patch(
+            "app.services.finance.payments.payment_service.PaystackClient"
+        ) as client_cls:
+            result = svc.resolve_indeterminate_transfer(intent.intent_id, _CFG)
+
+        assert intent.status == PaymentIntentStatus.COMPLETED
+        assert result.outcome.value == "skipped"
+        client_cls.assert_not_called()
+
+    def test_past_the_threshold_it_escalates(self, caplog) -> None:
+        org_id = _org_id()
+        db = MagicMock()
+        intent = self._unresolved(org_id, hours_ago=9)
+
+        db.scalars.return_value.one_or_none.return_value = intent
+        db.scalar.return_value = None
+
+        client_cm = _paystack_client_context(
+            verify_error=PaystackUnreachable("Request failed: connect timeout")
+        )
+
+        svc = self._svc(db, org_id)
+
+        with (
+            patch(
+                "app.services.finance.payments.payment_service.PaystackClient",
+                return_value=client_cm,
+            ),
+            patch.object(
+                PaymentService,
+                "resolve_transfer_unresolved_alert_threshold",
+                return_value=timedelta(hours=6),
+            ),
+            caplog.at_level("ERROR"),
+        ):
+            svc.resolve_indeterminate_transfer(intent.intent_id, _CFG)
+
+        assert any("ESCALATION" in record.message for record in caplog.records)
+
+    def test_below_the_threshold_it_does_not_escalate(self, caplog) -> None:
+        """Specificity for the test above — the alert is not simply always on."""
+        org_id = _org_id()
+        db = MagicMock()
+        intent = self._unresolved(org_id, hours_ago=1)
+
+        db.scalars.return_value.one_or_none.return_value = intent
+        db.scalar.return_value = None
+
+        client_cm = _paystack_client_context(
+            verify_error=PaystackUnreachable("Request failed: connect timeout")
+        )
+
+        svc = self._svc(db, org_id)
+
+        with (
+            patch(
+                "app.services.finance.payments.payment_service.PaystackClient",
+                return_value=client_cm,
+            ),
+            patch.object(
+                PaymentService,
+                "resolve_transfer_unresolved_alert_threshold",
+                return_value=timedelta(hours=6),
+            ),
+            caplog.at_level("ERROR"),
+        ):
+            svc.resolve_indeterminate_transfer(intent.intent_id, _CFG)
+
+        assert not any("ESCALATION" in record.message for record in caplog.records)
 
 
 class TestExpireStalePendingTransfer:

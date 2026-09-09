@@ -8,7 +8,11 @@ import pytest
 
 from app.models.people.hr import PositionAssignment
 from app.services.finance.import_export.base import build_alias_map
-from app.services.people.hr.import_export import EmployeeImporter
+from app.services.people.hr.import_export import (
+    EmployeeImporter,
+    EmploymentTypeImporter,
+)
+from app.services.people.hr.errors import EmploymentTypeNotFoundError
 from app.services.people.hr.web.import_web import HrImportWebService
 
 
@@ -110,3 +114,84 @@ def test_employee_import_alias_map_supports_position_fields():
     assert alias_map["position_id"] == "position_code"
     assert alias_map["manager_code"] == "reports_to_code"
     assert alias_map["expense_approver_code"] == "expense_approver_code"
+
+
+def test_employment_type_importer_delegates_writes_to_owner(
+    import_config, mock_db, monkeypatch
+):
+    employment_type_id = uuid4()
+    view = SimpleNamespace(employment_type_id=employment_type_id)
+    create_calls = []
+
+    class _Owner:
+        def __init__(self, db, organization_id, principal):
+            assert db is mock_db
+            assert organization_id == import_config.organization_id
+            assert principal.id == import_config.user_id
+
+        def create_employment_type(self, payload):
+            create_calls.append(payload)
+            return view
+
+    monkeypatch.setattr(
+        "app.services.people.hr.import_export.EmploymentTypeService", _Owner
+    )
+    importer = EmploymentTypeImporter(mock_db, import_config)
+
+    created = importer.create_entity(
+        {
+            "type_code": "CONTRACT",
+            "type_name": "Contract",
+            "description": "Fixed term",
+            "is_active": True,
+        }
+    )
+    importer._commit_batch([created])
+
+    assert created is view
+    assert create_calls[0].type_code == "CONTRACT"
+    assert importer.result.imported_ids == [employment_type_id]
+    mock_db.add.assert_not_called()
+
+
+def test_employee_importer_resolves_active_employment_type_code(
+    import_config, mock_db, monkeypatch
+):
+    employment_type_id = uuid4()
+
+    class _Owner:
+        def __init__(self, db, organization_id):
+            assert db is mock_db
+            assert organization_id == import_config.organization_id
+
+        def require_active_by_code(self, code):
+            assert code == "FULL_TIME"
+            return SimpleNamespace(employment_type_id=employment_type_id)
+
+    monkeypatch.setattr(
+        "app.services.people.hr.import_export.EmploymentTypeService", _Owner
+    )
+
+    importer = EmployeeImporter(mock_db, import_config)
+
+    assert importer._resolve_employment_type_id("FULL_TIME") == employment_type_id
+
+
+def test_employee_importer_treats_inactive_employment_type_as_unresolved(
+    import_config, mock_db, monkeypatch
+):
+    class _Owner:
+        def __init__(self, db, organization_id):
+            assert db is mock_db
+            assert organization_id == import_config.organization_id
+
+        def require_active_by_code(self, code):
+            raise EmploymentTypeNotFoundError(message=f"Inactive: {code}")
+
+    monkeypatch.setattr(
+        "app.services.people.hr.import_export.EmploymentTypeService", _Owner
+    )
+
+    importer = EmployeeImporter(mock_db, import_config)
+
+    assert importer._resolve_employment_type_id("CONTRACT") is None

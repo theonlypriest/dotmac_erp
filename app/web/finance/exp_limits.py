@@ -36,7 +36,6 @@ router = APIRouter(tags=["expense-limits-web"])
 # =============================================================================
 
 
-@router.get("/limits", response_class=HTMLResponse)
 @router.get("/limits/rules", response_class=HTMLResponse)
 def limit_rules_list(
     request: Request,
@@ -56,6 +55,20 @@ def limit_rules_list(
         is_active=is_active,
         search=search,
         page=page,
+    )
+
+
+@router.get("/limits", response_class=HTMLResponse)
+def limits_index(
+    request: Request,
+    auth: WebAuthContext = Depends(require_expense_access),
+    db: Session = Depends(get_db_for_org),
+):
+    """Show expense limit destinations."""
+    return expense_limit_web_service.limits_index_response(
+        request=request,
+        auth=auth,
+        db=db,
     )
 
 

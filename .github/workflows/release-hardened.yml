@@ -90,6 +90,7 @@ jobs:
           docker run --rm --name ci-hard-migrate --network ci-hardened-net \
             -e DATABASE_URL=postgresql+psycopg://postgres:postgres@ci-hard-db:5432/dotmac_erp_ci \
             -e MIGRATION_DATABASE_URL=postgresql+psycopg://app_admin@ci-hard-db:5432/dotmac_erp_ci \
+            -e PEOPLE_EMPLOYMENT_TYPE_ACTIVATION=1 \
             -e JWT_SECRET=ci-test-jwt-secret-key-minimum-32-bytes-long \
             -e TOTP_ENCRYPTION_KEY=QLUJktsTSfZEbST4R-37XmQ0tCkiVCBXZN2Zt053w8g= \
             -e REDIS_URL=redis://ci-hard-redis:6379/0 \
