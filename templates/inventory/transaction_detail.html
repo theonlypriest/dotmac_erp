@@ -197,7 +197,6 @@
     </div>
 
     <!-- Related Transactions -->
-    {% if related_transactions | default([]) | length > 0 %}
     <div class="card overflow-hidden">
         <div class="border-b border-slate-200 dark:border-slate-700 px-6 py-4">
             <h3 class="font-semibold text-slate-900 dark:text-white">Related Transactions</h3>
@@ -228,7 +227,7 @@
                     {% else %}
                     <tr>
                         <td colspan="99" class="p-0">
-                            {{ empty_state("No related_transactions found", "There are no related_transactions to display.") }}
+                            {{ empty_state("No related transactions", "This transaction has no linked source, reversal, or adjustment entries yet.", "document") }}
                         </td>
                     </tr>
                     {% endfor %}
@@ -236,6 +235,5 @@
             </table>
         </div>
     </div>
-    {% endif %}
 </div>
 {% endblock %}

@@ -271,8 +271,11 @@ class ProcurementWebService:
         return {
             "requisitions": requisitions,
             "total": total,
+            "total_count": total,
             "offset": offset,
             "limit": limit,
+            "page": (offset // limit) + 1 if limit else 1,
+            "total_pages": max(1, (total + limit - 1) // limit) if limit else 1,
             "search": search or "",
             "filter_status": status,
             "filter_urgency": urgency,
@@ -351,8 +354,11 @@ class ProcurementWebService:
         return {
             "rfqs": rfqs,
             "total": total,
+            "total_count": total,
             "offset": offset,
             "limit": limit,
+            "page": (offset // limit) + 1 if limit else 1,
+            "total_pages": max(1, (total + limit - 1) // limit) if limit else 1,
             "search": search or "",
             "filter_status": status,
             "filter_method": procurement_method,

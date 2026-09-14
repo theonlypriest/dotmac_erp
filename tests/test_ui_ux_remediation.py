@@ -102,6 +102,34 @@ def test_procurement_requisition_list_uses_shared_pagination_and_alpine_modals()
     assert "Previous</a>" not in template
 
 
+def test_procurement_requisition_and_rfq_lists_expose_page_pagination() -> None:
+    web_routes = (APP / "web" / "procurement.py").read_text(encoding="utf-8")
+    web_service = (
+        APP / "services" / "procurement" / "web" / "procurement_web.py"
+    ).read_text(encoding="utf-8")
+
+    assert "page: int | None = Query(None, ge=1)" in web_routes
+    assert "offset = (page - 1) * limit" in web_routes
+    assert '"page": (offset // limit) + 1 if limit else 1' in web_service
+    assert (
+        '"total_pages": max(1, (total + limit - 1) // limit) if limit else 1'
+        in web_service
+    )
+
+
+def test_procurement_rfq_list_uses_shared_pagination_and_alpine_modals() -> None:
+    template = (TEMPLATES / "procurement" / "rfqs" / "list.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert "pagination(" in template
+    assert 'filters={"status": filter_status, "method": filter_method}' in template
+    assert 'x-trap="importOpen"' in template
+    assert 'x-trap="exportOpen"' in template
+    assert "offset={{ offset" not in template
+    assert "Previous</a>" not in template
+
+
 def test_inventory_item_actions_are_permission_flagged() -> None:
     template = (TEMPLATES / "inventory" / "items.html").read_text(encoding="utf-8")
 
@@ -142,3 +170,12 @@ def test_people_leave_rejection_uses_modal_reason_not_prompt() -> None:
     assert 'x-trap="rejectOpen"' in detail
     assert 'value="Rejected"' not in team
     assert 'x-trap="rejectOpen"' in team
+
+
+def test_inventory_transaction_related_empty_state_is_user_friendly() -> None:
+    template = (TEMPLATES / "inventory" / "transaction_detail.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert "No related transactions" in template
+    assert "related_transactions found" not in template
