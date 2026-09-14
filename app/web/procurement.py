@@ -756,6 +756,7 @@ def requisition_list(
     status: str | None = None,
     urgency: str | None = None,
     search: str | None = None,
+    page: int | None = Query(None, ge=1),
     offset: int = Query(0, ge=0),
     limit: int = Query(25, ge=1, le=100),
     success: str | None = None,
@@ -764,6 +765,9 @@ def requisition_list(
     db: Session = Depends(get_db_for_org),
 ):
     """List purchase requisitions."""
+    if page is not None:
+        offset = (page - 1) * limit
+
     context = base_context(request, auth, "Requisitions", "procurement", db=db)
     web_service = ProcurementWebService(db)
     context.update(
@@ -1298,6 +1302,7 @@ def rfq_list(
     status: str | None = None,
     method: str | None = None,
     search: str | None = None,
+    page: int | None = Query(None, ge=1),
     offset: int = Query(0, ge=0),
     limit: int = Query(25, ge=1, le=100),
     success: str | None = None,
@@ -1306,6 +1311,9 @@ def rfq_list(
     db: Session = Depends(get_db_for_org),
 ):
     """List RFQs."""
+    if page is not None:
+        offset = (page - 1) * limit
+
     context = base_context(request, auth, "RFQs", "procurement", db=db)
     web_service = ProcurementWebService(db)
     context.update(
